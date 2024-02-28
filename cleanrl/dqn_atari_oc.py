@@ -22,6 +22,8 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
 from ocatari.core import EasyDonkey as ed
+from rllm.core import RLLMEnv
+from submodules.OC_RLLM.pong import calculate_reward as pong_cr
 
 @dataclass
 class Args:
@@ -83,7 +85,8 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
-            env = ed(render_mode="rgb_array")
+            #env = ed(render_mode="rgb_array")
+            env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)

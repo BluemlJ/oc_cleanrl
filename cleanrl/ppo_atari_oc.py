@@ -23,6 +23,7 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
 
 from ocatari.core import EasyDonkey as ed
 from rllm.core import RLLMEnv
+from submodules.OC_RLLM.pong import calculate_reward as pong_cr
 
 
 @dataclass
@@ -93,7 +94,7 @@ def make_env(env_id, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
-            env = RLLMEnv("Pong", "revised", calculate_reward, hud=False, render_mode="human")
+            env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
             #env = ed(render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
