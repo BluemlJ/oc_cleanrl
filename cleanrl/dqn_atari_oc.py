@@ -95,8 +95,10 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
 
         if args.rllm:
+            print("RLLM")
             env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
         else:
+            print("OCATARI")
             env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
         
         if capture_video and idx == 0:
