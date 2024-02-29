@@ -21,9 +21,17 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
-from ocatari.core import EasyDonkey as ed
-from rllm.core import RLLMEnv
-from submodules.OC_RLLM.pong import calculate_reward as pong_cr
+#from ocatari.core import EasyDonkey as ed
+import sys
+from pathlib import Path
+import os
+
+a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+sys.path.insert(1, a)
+
+from submodules.OC_RLLM.rllm.core import RLLMEnv
+from submodules.OC_RLLM.context.pong.reward_function import reward_function as pong_rf
+from submodules.OC_Atari.ocatari.core import OCAtari
 
 @dataclass
 class Args:
@@ -86,14 +94,17 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
             #env = ed(render_mode="rgb_array")
-            env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
+            env = RLLMEnv("Pong", "revised", pong_rf, hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+            #env = OCAtari("Pong", mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            #env = gym.make(env_id)
+            env = RLLMEnv("Pong", "revised", pong_rf, hud=False, render_mode="rgb_array")
+            
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=4)
+        env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
@@ -208,14 +219,18 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
+        
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}") #, episodic_return_new={rewards}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    #writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
+                    #writer.add_scalar("charts/episodic_return", rewards, global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                    
+                    
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
