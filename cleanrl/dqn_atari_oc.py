@@ -30,7 +30,7 @@ a = os.path.join(Path(__file__).parent.parent.resolve(),"")
 sys.path.insert(1, a)
 
 from submodules.OC_RLLM.rllm.core import RLLMEnv
-from submodules.OC_RLLM.context.pong.reward_function import reward_function as pong_rf
+from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 
 @dataclass
@@ -57,6 +57,8 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
+    rllm: bool = False
+    """RLLMENV or OCATARI Backend"""
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -91,15 +93,20 @@ class Args:
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
+
+        if args.rllm:
+            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+        else:
+            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+        
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
             #env = ed(render_mode="rgb_array")
-            env = RLLMEnv("Pong", "revised", pong_rf, hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
-            #env = OCAtari("Pong", mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+            #env = OCAtari("ALE/DonkeyKong", mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
+        #else:
             #env = gym.make(env_id)
-            env = RLLMEnv("Pong", "revised", pong_rf, hud=False, render_mode="rgb_array")
+            #env = RLLMEnv("Pong", "revised", grf("pong"), hud=False, render_mode="rgb_array")
             
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
@@ -225,8 +232,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             for info in infos["final_info"]:
                 if info and "episode" in info:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}") #, episodic_return_new={rewards}")
-                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    #writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
+                    #writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
                     #writer.add_scalar("charts/episodic_return", rewards, global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                     
