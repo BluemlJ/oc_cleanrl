@@ -1,3 +1,18 @@
+# OC-CleanRL
+
+This fork enables the use of CleanRL agents (such as C51 or DQN) on object-centred environments such as OCAtari or RLLMEnv with the aim of using objects in the input as well as within the reward functions and primarily serves as a trainer environment. 
+
+To test this, we are currently using the ALE.
+
+### Usage (Example C51 on the game of Pong, with RLLMEnv as backend)  
+
+```
+python cleanrl/c51_atari_oc.py --seed 1 --track --capture_video --wandb-project-name Pong_rf --env-id Pong --exp-name new_rf --rllm
+```
+
+
+
+
 # CleanRL (Clean Implementation of RL Algorithms)
 
 

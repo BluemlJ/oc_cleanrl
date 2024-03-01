@@ -234,9 +234,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             for info in infos["final_info"]:
                 if info and "episode" in info:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}") #, episodic_return_new={rewards}")
-                    #writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
-                    #writer.add_scalar("charts/episodic_return", rewards, global_step)
+                    
+                    if args.rllm:
+                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    else:
+                        writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                     
                     

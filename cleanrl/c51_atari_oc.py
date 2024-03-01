@@ -20,9 +20,20 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
-from ocatari.core import OCAtari
-from rllm.core import RLLMEnv
-from submodules.OC_RLLM.pong import calculate_reward as pong_cr
+from rtpt import RTPT
+import random
+import time
+
+import sys
+from pathlib import Path
+import os
+
+a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+sys.path.insert(1, a)
+
+from submodules.OC_RLLM.rllm.core import RLLMEnv
+from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
+from submodules.OC_Atari.ocatari.core import OCAtari
 
 @dataclass
 class Args:
@@ -48,6 +59,7 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
+    rllm: bool = False
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -87,13 +99,22 @@ class Args:
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
+
+        if args.rllm:
+            print("RLLM")
+            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+        else:
+            print("OCATARI")
+            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+        
+
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
             #env = ed(render_mode="rgb_array")
-            env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
+            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
+        #else:
+            #env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
         env = NoopResetEnv(env, noop_max=30)
@@ -159,6 +180,15 @@ if __name__ == "__main__":
 poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-license]==0.28.1"  "ale-py==0.8.1" 
 """
         )
+    
+    # Create RTPT object
+    rtpt = RTPT(name_initials='JB', experiment_name='TrainingAtari', max_iterations=1)
+
+    # Start the RTPT tracking
+    rtpt.start()
+
+
+
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -230,7 +260,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             for info in infos["final_info"]:
                 if info and "episode" in info:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    
+                    if args.rllm:
+                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    else:
+                        writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
+                    
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
