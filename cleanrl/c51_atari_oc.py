@@ -31,9 +31,11 @@ import os
 a = os.path.join(Path(__file__).parent.parent.resolve(),"")
 sys.path.insert(1, a)
 
-from submodules.OC_RLLM.rllm.core import RLLMEnv
+from submodules.OC_RLLM.ocallm.core import RLLMEnv
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
+from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
+
 
 @dataclass
 class Args:
@@ -102,10 +104,10 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
         if args.rllm:
             print("RLLM")
-            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False)
         else:
             print("OCATARI")
-            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=True, frameskip=1)
+            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
         
 
         if capture_video and idx == 0:

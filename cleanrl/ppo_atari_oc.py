@@ -21,9 +21,22 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     NoopResetEnv,
 )
 
-from ocatari.core import EasyDonkey as ed
-from rllm.core import RLLMEnv
-from submodules.OC_RLLM.pong import calculate_reward as pong_cr
+import sys
+from pathlib import Path
+import os
+
+a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+sys.path.insert(1, a)
+
+from rtpt import RTPT
+import random
+import time
+
+
+from submodules.OC_RLLM.ocallm.core import RLLMEnv
+from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
+from submodules.OC_Atari.ocatari.core import OCAtari
+from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
 
 
 @dataclass
@@ -44,6 +57,7 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
+    rllm: bool = False
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -92,13 +106,22 @@ class Args:
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
+
+        if args.rllm:
+            print("RLLM")
+            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
+        else:
+            print("OCATARI")
+            #env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
+            env = ed(render_mode="rgb_array")
+
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
-            env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
+            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
             #env = ed(render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
+        #else:
+            #env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -123,7 +146,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-class Agent(nn.Module):
+class PPOAgent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.network = nn.Sequential(
@@ -176,6 +199,13 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # Create RTPT object
+    rtpt = RTPT(name_initials='JB', experiment_name='TrainingAtari', max_iterations=1)
+
+    # Start the RTPT tracking
+    rtpt.start()
+
+
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -190,7 +220,7 @@ if __name__ == "__main__":
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = Agent(envs).to(device)
+    agent = PPOAgent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -334,14 +364,13 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        if epoch % 1000 == 0 or epoch == args.update_epochs:
-            model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-            model_data = {
-                "model_weights": agent.state_dict(),
-                "args": vars(args),
-            }
-            torch.save(model_data, model_path)
-            print(f"model saved to {model_path} in epoch {epoch}")
+    model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+    model_data = {
+        "model_weights": agent.state_dict(),
+        "args": vars(args),
+    }
+    torch.save(model_data, model_path)
+    print(f"model saved to {model_path} in epoch {epoch}")
 
 
     envs.close()

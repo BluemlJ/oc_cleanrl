@@ -29,7 +29,11 @@ import os
 a = os.path.join(Path(__file__).parent.parent.resolve(),"")
 sys.path.insert(1, a)
 
-from submodules.OC_RLLM.rllm.core import RLLMEnv
+from rtpt import RTPT
+import random
+import time
+
+from submodules.OC_RLLM.ocallm.core import RLLMEnv
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 
@@ -165,6 +169,15 @@ if __name__ == "__main__":
 poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-license]==0.28.1"  "ale-py==0.8.1" 
 """
         )
+    
+
+    # Create RTPT object
+    rtpt = RTPT(name_initials='JB', experiment_name='TrainingAtari', max_iterations=1)
+
+    # Start the RTPT tracking
+    rtpt.start()
+
+
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
