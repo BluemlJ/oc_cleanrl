@@ -4,3 +4,6 @@
 [submodule "submodules/OC_Atari"]
 	path = submodules/OC_Atari
 	url = https://github.com/k4ntz/OC_Atari
+[submodule "submodules/HackAtari"]
+	path = submodules/HackAtari
+	url = git@github.com:k4ntz/HackAtari.git
