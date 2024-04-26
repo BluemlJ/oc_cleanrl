@@ -32,6 +32,7 @@ a = os.path.join(Path(__file__).parent.parent.resolve(),"")
 sys.path.insert(1, a)
 
 from submodules.OC_RLLM.ocallm.core import RLLMEnv
+from submodules.Hackatari.hackatari.core import HackAtari
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
@@ -61,7 +62,7 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
-    rllm: bool = False
+    backend: int = 0
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -78,7 +79,7 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-    buffer_size: int = 1000000
+    buffer_size: int = 100000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -102,13 +103,19 @@ class Args:
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
 
-        if args.rllm:
+        if args.backend == 2:
+            print("Hackatari")
+            env = HackAtari(env_id, modifs=args.modifs.split(" "), mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False)
+        elif args.backend == 1:
             print("RLLM")
-            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False)
-        else:
+            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
+        elif args.backend == 0:
             print("OCATARI")
             env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
-        
+            #env = ed(render_mode="rgb_array")
+            # env = ek(render_mode="rgb_array")
+        else:
+            raise ValueError("Unknown Backend")
 
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
@@ -156,6 +163,20 @@ class QNetwork(nn.Module):
             nn.Linear(64 * 7 * 7, 512), nn.ReLU(inplace=True), nn.Linear(512, self.n * n_atoms),
         )
 
+        #self.__features = nn.Sequential(
+        #    nn.Linear(4, 16),
+        #    nn.ReLU(inplace=True),
+        #    nn.Linear(16, 64),
+        #    nn.ReLU(inplace=True),
+        #    nn.Linear(64, 64),
+        #    nn.ReLU(inplace=True),
+        #    nn.Linear(64, 64),
+        #    nn.ReLU(inplace=True),
+        #)
+        #self.__head = nn.Sequential(
+        #    nn.Linear(64 * 12, 1024), nn.ReLU(inplace=True), nn.Linear(1024, self.n * n_atoms),
+        #)
+
     def get_action(self, x, action=None):
         y = self.__features(x / 255.0)
         logits = self.__head(y.view(y.size(0), -1))
@@ -197,7 +218,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     if args.track:
         import wandb
 
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -242,6 +263,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
+    #import ipdb; ipdb.set_trace()
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
@@ -264,9 +286,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     
                     if args.rllm:
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                        writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
+                        writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
                     else:
-                        writer.add_scalar("charts/episodic_return_original", info["episode"]["r"], global_step)
+                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -284,6 +307,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
+                #import ipdb; ipdb.set_trace()
                 with torch.no_grad():
                     _, next_pmfs = target_network.get_action(data.next_observations)
                     next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
@@ -330,6 +354,29 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         }
         torch.save(model_data, model_path)
         print(f"model saved to {model_path}")
+
+        artifact = wandb.Artifact('model', type='model')
+        artifact.add_file(model_path)
+        run.log_artifact(artifact)
+        run.finish()
+
+        # data_list = []
+        # for i in range(args.buffer_size):
+        #     data_dict = {
+        #         "obs": rb.observations[i].flatten().tolist(),
+        #         "actions": rb.actions[i].flatten().tolist(),
+        #         "rewards": rb.rewards[i].flatten().tolist(),
+        #         "dones": rb.dones[i].flatten().tolist(),
+        #     }
+        #     data_list.append(data_dict)
+        
+        
+        # df = pd.DataFrame(data_list, columns=["obs", "actions", "rewards", "next_obs", "dones"])
+        # df.to_csv(f'runs/{run_name}/replay_buffer_data.csv')
+
+        # import ipdb
+        # ipdb.set_trace()
+
         from cleanrl_utils.evals.c51_eval import evaluate
 
         episodic_returns = evaluate(

@@ -34,10 +34,11 @@ import time
 
 
 from submodules.OC_RLLM.ocallm.core import RLLMEnv
+from submodules.Hackatari.hackatari.core import HackAtari
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
-
+from submodules.OC_Atari.ocatari.core import EasyKangaroo as ek
 
 @dataclass
 class Args:
@@ -57,7 +58,9 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    rllm: bool = False
+    backend: int = 0
+    '''Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI'''
+    modifs: str = ""
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -106,15 +109,20 @@ class Args:
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
-
-        if args.rllm:
+        if args.backend == 2:
+            print("Hackatari")
+            env = HackAtari(env_id, modifs=args.modifs.split(" "), mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False)
+        elif args.backend == 1:
             print("RLLM")
-            env = RLLMEnv(env_id, "revised", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
-        else:
+            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
+        elif args.backend == 0:
             print("OCATARI")
-            #env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
-            env = ed(render_mode="rgb_array")
-
+            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
+            #env = ed(render_mode="rgb_array")
+            # env = ek(render_mode="rgb_array")
+        else:
+            raise ValueError("Unknown Backend")
+        
         if capture_video and idx == 0:
             #env = gym.make(env_id, render_mode="rgb_array")
             #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
@@ -127,7 +135,7 @@ def make_env(env_id, idx, capture_video, run_name):
             if idx == 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=4)
+        env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
@@ -135,6 +143,7 @@ def make_env(env_id, idx, capture_video, run_name):
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 4)
+
         return env
 
     return thunk
@@ -184,7 +193,7 @@ if __name__ == "__main__":
     if args.track:
         import wandb
 
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -269,7 +278,7 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-
+       
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -372,6 +381,10 @@ if __name__ == "__main__":
     torch.save(model_data, model_path)
     print(f"model saved to {model_path} in epoch {epoch}")
 
+    artifact = wandb.Artifact('model', type='model')
+    artifact.add_file(model_path)
+    run.log_artifact(artifact)
+    run.finish()
 
     envs.close()
     writer.close()
