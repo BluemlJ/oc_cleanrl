@@ -34,7 +34,7 @@ import time
 
 
 from submodules.OC_RLLM.ocallm.core import RLLMEnv
-from submodules.Hackatari.hackatari.core import HackAtari
+from submodules.HackAtari.hackatari.core import HackAtari
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
@@ -135,14 +135,14 @@ def make_env(env_id, idx, capture_video, run_name):
             if idx == 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=1)
+        #env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
         env = ClipRewardEnv(env)
-        env = gym.wrappers.ResizeObservation(env, (84, 84))
-        env = gym.wrappers.GrayScaleObservation(env)
-        env = gym.wrappers.FrameStack(env, 4)
+        #env = gym.wrappers.ResizeObservation(env, (84, 84))
+        #env = gym.wrappers.GrayScaleObservation(env)
+        #env = gym.wrappers.FrameStack(env, 4)
 
         return env
 
@@ -275,8 +275,11 @@ if __name__ == "__main__":
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                        if args.backend == 1:
+                            writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
+                            writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
+                        else:
+                            writer.add_scalar("charts/episodic_return_original_rf", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
        
         # bootstrap value if not done
@@ -370,7 +373,6 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

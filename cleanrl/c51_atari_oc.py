@@ -32,7 +32,7 @@ a = os.path.join(Path(__file__).parent.parent.resolve(),"")
 sys.path.insert(1, a)
 
 from submodules.OC_RLLM.ocallm.core import RLLMEnv
-from submodules.Hackatari.hackatari.core import HackAtari
+from submodules.HackAtari.hackatari.core import HackAtari
 from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
 from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
@@ -63,6 +63,8 @@ class Args:
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
     backend: int = 0
+    '''Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI'''
+    modifs: str = ""
 
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
@@ -111,7 +113,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
         elif args.backend == 0:
             print("OCATARI")
-            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
+            env = OCAtari(env_id, mode="ram", obs_mode="dqn", hud=False, render_mode="rgb_array", render_oc_overlay=False)
             #env = ed(render_mode="rgb_array")
             # env = ek(render_mode="rgb_array")
         else:
@@ -127,14 +129,14 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=1)
+        #env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
         env = ClipRewardEnv(env)
-        env = gym.wrappers.ResizeObservation(env, (84, 84))
-        env = gym.wrappers.GrayScaleObservation(env)
-        env = gym.wrappers.FrameStack(env, 4)
+        #env = gym.wrappers.ResizeObservation(env, (84, 84))
+        #env = gym.wrappers.GrayScaleObservation(env)
+        #env = gym.wrappers.FrameStack(env, 4)
             
         env.action_space.seed(seed)
         return env
@@ -263,7 +265,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
-    #import ipdb; ipdb.set_trace()
+    #import ipdb;ipdb.set_trace()
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
@@ -283,9 +285,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                    
-                    if args.rllm:
+                    if args.backend == 1:
                         writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
                     else:
@@ -334,7 +334,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     old_val = (old_pmfs * q_network.atoms).sum(1)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-                    print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
                 # optimize the model
