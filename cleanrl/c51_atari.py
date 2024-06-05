@@ -20,6 +20,18 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
+from rtpt import RTPT
+import random
+import time
+
+import sys
+from pathlib import Path
+import os
+
+a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+sys.path.insert(1, a)
+
+from submodules.Hackatari.hackatari.core import HackAtari
 
 @dataclass
 class Args:
@@ -39,13 +51,13 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
-
+    
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
@@ -61,7 +73,7 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-    buffer_size: int = 1000000
+    buffer_size: int = 100000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -79,19 +91,23 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
-
+    frameskip: int = -1
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
+        env = HackAtari(env_id, modifs=args.modifs.split(" "), rewardfunc_path=args.new_rf, mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False, frameskip=args.frameskip)
+        
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            #env = gym.make(env_id, render_mode="rgb_array")
+            #env = ed(render_mode="rgb_array")
+            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
+        #else:
+            #env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=4)
+        env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
@@ -99,7 +115,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 4)
-
+            
         env.action_space.seed(seed)
         return env
 
@@ -114,21 +130,22 @@ class QNetwork(nn.Module):
         self.n_atoms = n_atoms
         self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
         self.n = env.single_action_space.n
-        self.network = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(3136, 512),
-            nn.ReLU(),
-            nn.Linear(512, self.n * n_atoms),
+        
+        self.__features = nn.Sequential(
+            nn.Conv2d(4, 32, kernel_size=8, stride=4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+        )
+        self.__head = nn.Sequential(
+            nn.Linear(64 * 7 * 7, 512), nn.ReLU(inplace=True), nn.Linear(512, self.n * n_atoms),
         )
 
     def get_action(self, x, action=None):
-        logits = self.network(x / 255.0)
+        y = self.__features(x / 255.0)
+        logits = self.__head(y.view(y.size(0), -1))
         # probability mass function for each action
         pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
         q_values = (pmfs * self.atoms).sum(2)
@@ -158,7 +175,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     if args.track:
         import wandb
 
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -220,7 +237,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")    
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -284,6 +301,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         }
         torch.save(model_data, model_path)
         print(f"model saved to {model_path}")
+
+        artifact = wandb.Artifact('model', type='model')
+        artifact.add_file(model_path)
+        run.log_artifact(artifact)
+        run.finish()
+
         from cleanrl_utils.evals.c51_eval import evaluate
 
         episodic_returns = evaluate(

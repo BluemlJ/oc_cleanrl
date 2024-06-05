@@ -21,6 +21,22 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     NoopResetEnv,
 )
 
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecEnv, VecNormalize, SubprocVecEnv, VecVideoRecorder
+
+import sys
+from pathlib import Path
+import os
+
+a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+sys.path.insert(1, a)
+
+from rtpt import RTPT
+import random
+import time
+
+
+from submodules.HackAtari.hackatari.core import HackAtari
 
 @dataclass
 class Args:
@@ -38,9 +54,13 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-
+    modifs: str = ""
+    '''Modifications for Hackatari'''
+    new_rf: str = ""
+    '''Path to a new reward functions for OCALM and HACKATARI'''
+    
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
@@ -84,28 +104,32 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-
+    frameskip: int = -1
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
+        env = HackAtari(env_id, modifs=args.modifs.split(" "), rewardfunc_path=args.new_rf, mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False, frameskip=args.frameskip)
+        
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
+            #env = gym.make(env_id, render_mode="rgb_array")
+            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
+            #env = ed(render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"cleanrl/videos/{run_name}")
+            #env = Monitor(env)  # record stats such as returns
+            
+        #else:
+            #env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        if capture_video:
-            if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=4)
+        #env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = ClipRewardEnv(env)
-        env = gym.wrappers.ResizeObservation(env, (84, 84))
-        env = gym.wrappers.GrayScaleObservation(env)
-        env = gym.wrappers.FrameStack(env, 4)
+        #env = ClipRewardEnv(env)
+        #env = gym.wrappers.ResizeObservation(env, (84, 84))
+        #env = gym.wrappers.GrayScaleObservation(env)
+        #env = gym.wrappers.FrameStack(env, 4)
+
         return env
 
     return thunk
@@ -117,7 +141,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-class Agent(nn.Module):
+class PPOAgent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.network = nn.Sequential(
@@ -131,7 +155,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(64 * 7 * 7, 512)),
             nn.ReLU(),
         )
-        self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
+        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def get_value(self, x):
@@ -179,17 +203,21 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
+    envs = SubprocVecEnv(
+        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(0,args.num_envs)]
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
-    agent = Agent(envs).to(device)
+    envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
+    
+    envs.seed(args.seed)
+    #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    
+    agent = PPOAgent(envs).to(device)
+    
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -198,7 +226,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -208,6 +236,11 @@ if __name__ == "__main__":
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+
+        elength=0
+        eorgr=0
+        count=0
+        done_in_episode=False
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs
@@ -222,18 +255,22 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = np.logical_or(terminations, truncations)
+            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
+            # next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
-
-            if "final_info" in infos:
-                for info in infos["final_info"]:
-                    if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-
+              
+            if 1 in next_done:
+                for info in infos:
+                    if "episode" in info:
+                        count +=1
+                        done_in_episode=True
+                        eorgr += info["episode"]["r"]
+                        elength += info["episode"]["l"]
+                        #writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
+                        #writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
+                        #writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+       
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -251,9 +288,9 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_actions = actions.reshape((-1,) + envs.action_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
@@ -317,6 +354,10 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
+        if done_in_episode:
+            writer.add_scalar("charts/Episodic_OrgRF", eorgr/count, global_step)
+            writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
+        
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
@@ -325,8 +366,20 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+    model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+    model_data = {
+        "model_weights": agent.state_dict(),
+        "args": vars(args),
+    }
+    torch.save(model_data, model_path)
+    print(f"model saved to {model_path} in epoch {epoch}")
+
+    artifact = wandb.Artifact('model', type='model')
+    artifact.add_file(model_path)
+    wandb.log_artifact(artifact)
+    wandb.finish()
 
     envs.close()
     writer.close()
