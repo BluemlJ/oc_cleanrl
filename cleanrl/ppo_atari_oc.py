@@ -35,13 +35,8 @@ from rtpt import RTPT
 import random
 import time
 
-
-from submodules.OC_RLLM.ocallm.core import RLLMEnv
 from submodules.HackAtari.hackatari.core import HackAtari
-from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
 from submodules.OC_Atari.ocatari.core import OCAtari
-from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
-from submodules.OC_Atari.ocatari.core import EasyKangaroo as ek
 
 @dataclass
 class Args:
@@ -122,6 +117,8 @@ def make_env(env_id, idx, capture_video, run_name):
             env = HackAtari(env_id, modifs=args.modifs.split(" "), rewardfunc_path=args.new_rf, mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False, frameskip=args.frameskip)
         elif args.backend == 1:
             print("RLLM")
+            from submodules.OC_RLLM.ocallm.core import RLLMEnv
+            from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
             env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
         elif args.backend == 0:
             print("OCATARI")
