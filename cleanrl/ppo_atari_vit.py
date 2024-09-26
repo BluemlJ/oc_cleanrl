@@ -56,7 +56,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = False
+    cuda: bool = True
     """if toggled, cuda will be enabled by default"""
 
     # Environment
@@ -96,7 +96,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 10
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -162,10 +162,12 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
                           render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == 0:
             logger.info("Using OCAtari backend")
-            env = OCAtari(env_id, hud=False, render_mode="rgb_array",
-                          render_oc_overlay=False, obs_mode=args.obs_mode,
-                          logger=logger, feature_func=feature_func,
-                          buffer_window_size=window_size)
+            env = OCAtari(
+                env_id, hud=False, render_mode="rgb_array",
+                    render_oc_overlay=False, obs_mode=args.obs_mode,
+                    # logger=logger, feature_func=feature_func,
+                    # buffer_window_size=window_size
+            )
         else:
             raise ValueError("Unknown Backend")
 
@@ -287,7 +289,7 @@ if __name__ == "__main__":
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                     args.patch_size, device)
+                     args.patch_size, args.buffer_window_size, device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup

@@ -54,7 +54,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = False
+    cuda: bool = True
     """if toggled, cuda will be enabled by default"""
 
     # Environment
@@ -158,10 +158,12 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
                           render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == 0:
             logger.info("Using OCAtari backend")
-            env = OCAtari(env_id, mode="ram", hud=False, render_mode="rgb_array",
-                          render_oc_overlay=False, obs_mode=args.obs_mode,
-                          logger=logger, feature_func=feature_func,
-                          buffer_window_size=window_size)
+            env = OCAtari(
+                env_id, mode="ram", hud=False, render_mode="rgb_array",
+                render_oc_overlay=False, obs_mode=args.obs_mode,
+                # logger=logger, feature_func=feature_func,
+                # buffer_window_size=window_size
+            )
         else:
             raise ValueError("Unknown Backend")
 
