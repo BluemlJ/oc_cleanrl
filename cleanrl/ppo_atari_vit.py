@@ -88,7 +88,7 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
-    logging_level: int = 40
+    logging_level: int = 10
     """Logging level for the Gymnasium logger"""
 
     # Algorithm specific arguments
@@ -212,7 +212,7 @@ class PPOAgent(nn.Module):
                 depth=num_blocks,
                 heads=num_heads,
                 mlp_dim=emb_dim,
-            ),
+            ).to(device),
             nn.Flatten(),
         )
         self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
@@ -278,6 +278,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    logger.debug(f"Using device {device}.")
 
     # env setup
     envs = SubprocVecEnv(
