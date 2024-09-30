@@ -81,7 +81,7 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "OCRL_Transformer"
     """the wandb's project name"""
-    wandb_entity: str = "VanillaWhey"
+    wandb_entity: str = None
     """the entity (team) of wandb's project"""
     wandb_dir: str = "../wandb"
     """the wandb directory"""

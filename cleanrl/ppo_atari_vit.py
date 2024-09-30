@@ -82,13 +82,13 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "OCRL_Transformer"
     """the wandb's project name"""
-    wandb_entity: str = "VanillaWhey"
+    wandb_entity: str = None
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
-    logging_level: int = 10
+    logging_level: int = 40
     """Logging level for the Gymnasium logger"""
 
     # Algorithm specific arguments
