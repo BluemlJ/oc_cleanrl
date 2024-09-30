@@ -7,6 +7,7 @@ import random
 import warnings
 
 import numpy as np
+from stable_baselines3.common.evaluation import evaluate_policy
 
 from tqdm import tqdm
 from rtpt import RTPT
@@ -82,6 +83,8 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = "VanillaWhey"
     """the entity (team) of wandb's project"""
+    wandb_dir: str = "../wandb"
+    """the wandb directory"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
@@ -90,11 +93,11 @@ class Args:
     """Logging level for the Gymnasium logger"""
 
     # Algorithm specific arguments
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 128
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 10
+    num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -145,15 +148,15 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
         logger.set_level(args.logging_level)
         if args.backend == 2:
             logger.info("Using Hackatari backend")
-            from hackatari.core import HackAtari
+            from hackatari.core import HackAtari  # noqa: F401
             env = HackAtari(env_id, modifs=args.modifs.split(" "),
                             rewardfunc_path=args.new_rf, mode="ram",
                             hud=False, render_mode="rgb_array", logger=logger,
                             render_oc_overlay=False, frameskip=args.frameskip)
         elif args.backend == 1:
             logger.info("Using RLLM backend")
-            from OC_RLLM.ocallm.core import RLLMEnv
-            from OC_RLLM.get_reward_function import get_reward_function as grf
+            from OC_RLLM.ocallm.core import RLLMEnv  # noqa: F401
+            from OC_RLLM.get_reward_function import get_reward_function as grf  # noqa: F401
             env = RLLMEnv(env_id, "ram", grf(env_id), hud=False,
                           render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == 0:
@@ -197,6 +200,8 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class PPOAgent(nn.Module):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
         super().__init__()
+
+        self.device = device
         dims = envs.observation_space.feature_space.shape
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
@@ -222,6 +227,10 @@ class PPOAgent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
+    def predict(self, x, states=None, **_):
+        with torch.no_grad():
+            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -241,11 +250,12 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            dir=args.wandb_dir
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"wandb/{run_name}"
+        writer_dir = f"{args.wandb_dir}/{run_name}"
         postfix = None
 
     writer = SummaryWriter(writer_dir)
@@ -458,6 +468,10 @@ if __name__ == "__main__":
     logger.info(f"model saved to {model_path} in epoch {epoch}")
 
     if args.track:
+        # final performance
+        mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
+        wandb.log({"FinalReward": mean})
+
         artifact = wandb.Artifact('model', type='model')
         artifact.add_file(model_path)
         # wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
