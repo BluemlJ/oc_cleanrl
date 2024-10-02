@@ -1,17 +1,26 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 import os
-import random
+import sys
+import tyro
 import time
+import random
+import warnings
+
+import numpy as np
+from stable_baselines3.common.evaluation import evaluate_policy
+
+from tqdm import tqdm
+from rtpt import RTPT
 from dataclasses import dataclass
 
 import gymnasium as gym
-import numpy as np
+from gymnasium import logger
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import tyro
-from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
     ClipRewardEnv,
@@ -20,59 +29,78 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     MaxAndSkipEnv,
     NoopResetEnv,
 )
+from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import VecEnv, VecNormalize, SubprocVecEnv, VecVideoRecorder
+oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
-import sys
-from pathlib import Path
-import os
+if oc_atari_dir is not None:
+    a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
+    sys.path.insert(1, a)
 
-a = os.path.join(Path(__file__).parent.parent.resolve(),"")
-sys.path.insert(1, a)
+from ocatari.core import OCAtari
+from ocrltransformer.wrappers import OCWrapper
+from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
-from rtpt import RTPT
-import random
-import time
 
-from submodules.HackAtari.hackatari.core import HackAtari
-from submodules.OC_Atari.ocatari.core import OCAtari
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 
 @dataclass
 class Args:
+    # General
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 42
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+
+    # Environment
+    env_id: str = "ALE/Pong-v5"
+    """the id of the environment"""
+    obs_mode: str = "masked_dqn"
+    """observation mode for OCAtari"""
+    feature_func: str = "xywh"
+    """the object features to use as observations"""
+    buffer_window_size: int = 4
+    """length of history in the observations"""
+    backend: str = "OCAtari"
+    """Which Backend should we use"""
+    modifs: str = ""
+    """Modifications for Hackatari"""
+    new_rf: str = ""
+    """Path to a new reward functions for OCALM and HACKATARI"""
+    frameskip: int = -1
+    """the frame skipping option of the environment"""
+
+    # Tracking
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "OCRL_Transformer"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    backend: int = 0
-    '''Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI'''
-    modifs: str = ""
-    '''Modifications for Hackatari'''
-    new_rf: str = ""
-    '''Path to a new reward functions for OCALM and HACKATARI'''
     ckpt: str = ""
-    '''Path to a checkpoint to a model to start training from'''
+    """Path to a checkpoint to a model to start training from"""
+    logging_level: int = 40
+    """Logging level for the Gymnasium logger"""
+    author : str = "JB"
+    """ Initials of the author """
 
     # Algorithm specific arguments
-    env_id: str = "BreakoutNoFrameskip-v4"
-    """the id of the environment"""
-    total_timesteps: int = 10000000
+    architecture : str = "PPO_default"
+    """ Specifies the used archtiecture"""
+
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 8
+    num_envs: int = 10
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -100,6 +128,14 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    
+    # Transformer
+    emb_dim: int = 128
+    """input embedding size of the transformer"""
+    num_heads: int = 8
+    """number of multi-attention heads"""
+    num_blocks: int = 4
+    """number of transformer blocks"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -108,35 +144,41 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-    frameskip = "random"
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
-        if args.backend == 2:
-            print("Hackatari")
+        logger.set_level(args.logging_level)
+        if args.backend == "HackAtari":
+            logger.info("Using Hackatari backend")
             env = HackAtari(env_id, modifs=args.modifs.split(" "), rewardfunc_path=args.new_rf, mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False, frameskip=args.frameskip)
-        elif args.backend == 1:
-            print("RLLM")
+        elif args.backend == "OCALLM":
+            logger.info("Using RLLM backend")
             from submodules.OC_RLLM.ocallm.core import RLLMEnv
             from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
             env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
-        elif args.backend == 0:
-            print("OCATARI")
-            env = OCAtari(env_id, mode="revised", hud=False, render_mode="rgb_array", render_oc_overlay=False)
-            #env = ed(render_mode="rgb_array")
-            # env = ek(render_mode="rgb_array")
+        elif args.backend == "OCAtari":
+            logger.info("Using OCAtari backend")
+            env = OCAtari(
+                env_id, hud=False, render_mode="rgb_array",
+                    render_oc_overlay=False, obs_mode=args.obs_mode,
+                    # logger=logger, feature_func=feature_func,
+                    # buffer_window_size=window_size
+            )
         else:
             raise ValueError("Unknown Backend")
         
         if capture_video and idx == 0:
-            #env = gym.make(env_id, render_mode="rgb_array")
-            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
-            #env = ed(render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"cleanrl/videos/{run_name}")
-            #env = Monitor(env)  # record stats such as returns
-            
-        #else:
-            #env = gym.make(env_id)
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/videos",
+                                           disable_logger=True)
+
+        # Set the Network Architecture 
+        if args.architecture == "PPO_default"
+            from architecture.ppo import PPO_default as Agent
+        elif args.architecture == "OCTransformer"
+            from architecture.transformer import OCTransformer as Agent
+        elif args.architecture == "VIT"
+            from architecture.transformer import VIT as Agent
+
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
         #env = MaxAndSkipEnv(env, skip=1)
@@ -148,44 +190,12 @@ def make_env(env_id, idx, capture_video, run_name):
         #env = gym.wrappers.GrayScaleObservation(env)
         #env = gym.wrappers.FrameStack(env, 4)
 
+        if args.architecture == "Transformer":
+            env = OCWrapper(env)
+
         return env
 
     return thunk
-
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class PPOAgent(nn.Module):
-    def __init__(self, envs):
-        super().__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
-        )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-
-    def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
-
-    def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
 if __name__ == "__main__":
@@ -213,11 +223,12 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials='JB', experiment_name='TrainingAtari', max_iterations=1)
-
+    rtpt = RTPT(name_initials=args.author, experiment_name='OCAtari',
+                max_iterations=args.num_iterations)
     # Start the RTPT tracking
     rtpt.start()
 
+    logger.set_level(args.logging_level)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -226,6 +237,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    logger.debug(f"Using device {device}.")
+
 
     # env setup
     envs = SubprocVecEnv(
@@ -235,8 +248,8 @@ if __name__ == "__main__":
     
     envs.seed(args.seed)
     #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-    
-    agent = PPOAgent(envs).to(device)
+
+    agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -296,9 +309,6 @@ if __name__ == "__main__":
                         else:
                             eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
-                        #writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
-                        #writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
-                        #writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
        
         # bootstrap value if not done
         with torch.no_grad():
@@ -385,9 +395,10 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if done_in_episode:
             if args.backend == 1 or (args.backend == 2 and args.new_rf):
-                writer.add_scalar("charts/Episodic_NewRF", enewr/count, global_step)
-            writer.add_scalar("charts/Episodic_OrgRF", eorgr/count, global_step)
+                writer.add_scalar("charts/Episodic_New_Reward", enewr/count, global_step)
+            writer.add_scalar("charts/Episodic_Original_Reward", eorgr/count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
+            pbar.set_description(f"Reward: {eorgr / count:.1f}")
         
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -399,19 +410,27 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        # Update RTPT
+        rtpt.step()
+
+    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
     model_data = {
         "model_weights": agent.state_dict(),
         "args": vars(args),
     }
     torch.save(model_data, model_path)
-    print(f"model saved to {model_path} in epoch {epoch}")
+    logger.info(f"model saved to {model_path} in epoch {epoch}")
 
-    artifact = wandb.Artifact('model', type='model')
-    artifact.add_file(model_path)
-    #wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
-    wandb.log_artifact(artifact)
-    wandb.finish()
+    if args.track:
+        # final performance
+        mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
+        wandb.log({"FinalReward": mean})
+
+        artifact = wandb.Artifact('model', type='model')
+        artifact.add_file(model_path)
+        # wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
+        wandb.log_artifact(artifact)
+        wandb.finish()
 
     envs.close()
     writer.close()
