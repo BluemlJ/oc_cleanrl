@@ -62,7 +62,7 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "dqn"
+    obs_mode: str = "masked_dqn"
     """observation mode for OCAtari"""
     feature_func: str = "xywh"
     """the object features to use as observations"""

@@ -83,8 +83,8 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    wandb_dir: str = "../wandb"
-    """the wandb directory"""
+    #wandb_dir: str = "wandb"
+    #"""the wandb directory"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
@@ -93,11 +93,11 @@ class Args:
     """Logging level for the Gymnasium logger"""
 
     # Algorithm specific arguments
-    total_timesteps: int = 128
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 10
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -126,12 +126,15 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
+    # Agent
+    architecture = "PPO_default"
+    """ Specifies the used archtiecture"""
     # Transformer
-    emb_dim: int = 64
+    emb_dim: int = 128
     """input embedding size of the transformer"""
     num_heads: int = 8
     """number of multi-attention heads"""
-    num_blocks: int = 2
+    num_blocks: int = 4
     """number of transformer blocks"""
 
     # to be filled in runtime
@@ -250,7 +253,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            dir=args.wandb_dir
+            #dir=args.wandb_dir
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)

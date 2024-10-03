@@ -31,10 +31,14 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
+import sys
+from pathlib import Path
+import os
+
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
 if oc_atari_dir is not None:
-    a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
+    a = os.path.join(Path(__file__).parent.parent.resolve(),"")
     sys.path.insert(1, a)
 
 from ocatari.core import OCAtari
@@ -44,7 +48,6 @@ from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
-
 
 @dataclass
 class Args:
@@ -63,8 +66,6 @@ class Args:
     """the id of the environment"""
     obs_mode: str = "masked_dqn"
     """observation mode for OCAtari"""
-    feature_func: str = "xywh"
-    """the object features to use as observations"""
     buffer_window_size: int = 4
     """length of history in the observations"""
     backend: str = "OCAtari"
@@ -79,7 +80,7 @@ class Args:
     # Tracking
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "OCRL_Transformer"
+    wandb_project_name: str = "OC"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -96,7 +97,7 @@ class Args:
     architecture : str = "PPO_default"
     """ Specifies the used archtiecture"""
 
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 20_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -136,6 +137,8 @@ class Args:
     """number of multi-attention heads"""
     num_blocks: int = 4
     """number of transformer blocks"""
+    patch_size: int = 12
+    """ViT patch size"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -145,7 +148,9 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-def make_env(env_id, idx, capture_video, run_name):
+global args
+        
+def make_env(env_id, idx, capture_video, run_dir, window_size):
     def thunk():
         logger.set_level(args.logging_level)
         if args.backend == "HackAtari":
@@ -171,13 +176,9 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"{run_dir}/videos",
                                            disable_logger=True)
 
-        # Set the Network Architecture 
-        if args.architecture == "PPO_default"
-            from architecture.ppo import PPO_default as Agent
-        elif args.architecture == "OCTransformer"
-            from architecture.transformer import OCTransformer as Agent
-        elif args.architecture == "VIT"
-            from architecture.transformer import VIT as Agent
+        a = os.path.join(Path(__file__).parent.resolve(),"")
+        print(a)
+        sys.path.insert(1, a)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
@@ -204,10 +205,11 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    
     if args.track:
         import wandb
 
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
@@ -216,10 +218,17 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
+        writer_dir = run.dir
+        postfix = dict(url=run.url)
+    else:
+        writer_dir = f"wandb/{run_name}"
+        postfix = None
+
+    writer = SummaryWriter(writer_dir)
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % ("\n".join(
+            [f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # Create RTPT object
@@ -242,14 +251,29 @@ if __name__ == "__main__":
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(0,args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir, args.buffer_window_size) for i in range(0, args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
     envs.seed(args.seed)
     #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = Agent(envs).to(device)
+    if args.architecture == "OCT":
+        from architectures.transformer import OCTransformer as Agent
+    elif args.architecture == "VIT":
+        from architectures.transformer import VIT as Agent
+    elif args.architecture == "VIT2":
+        from architectures.transformer import SimpleViT2 as Agent
+    elif args.architecture == "MobileVit":
+        from architectures.transformer import MobileVIT as Agent
+    elif args.architecture == "MobileVit2":
+        from architectures.transformer import MobileViT2 as Agent
+    else:
+        from architectures.ppo import PPO_default as Agent
+
+
+    agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
+                     args.patch_size, args.buffer_window_size, device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -267,8 +291,8 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    for iteration in range(1, args.num_iterations + 1):
-        # Annealing the rate if instructed to do so.
+    pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
+    for iteration in pbar:    # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
@@ -307,7 +331,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_reward"]
                         else:
-                            eorgr += info["episode"]["r"]
+                            eorgr += info["episode"]["r"].item()
                         elength += info["episode"]["l"]
        
         # bootstrap value if not done
