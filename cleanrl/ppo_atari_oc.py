@@ -7,10 +7,10 @@ import random
 import warnings
 
 import numpy as np
-from stable_baselines3.common.evaluation import evaluate_policy
 
 from tqdm import tqdm
 from rtpt import RTPT
+from pathlib import Path
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -23,31 +23,25 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
-    ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
-    MaxAndSkipEnv,
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-
-import sys
-from pathlib import Path
-import os
+from stable_baselines3.common.evaluation import evaluate_policy
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
 if oc_atari_dir is not None:
-    a = os.path.join(Path(__file__).parent.parent.resolve(),"")
+    a = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocatari.core import OCAtari
 from ocrltransformer.wrappers import OCWrapper
-from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+
 
 @dataclass
 class Args:
@@ -64,8 +58,10 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "masked_dqn"
+    obs_mode: str = "dqn"
     """observation mode for OCAtari"""
+    feature_func: str = ""
+    """the object features to use as observations"""
     buffer_window_size: int = 4
     """length of history in the observations"""
     backend: str = "OCAtari"
@@ -84,14 +80,16 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    wandb_dir: str = None
+    """the wandb directory"""
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
     author : str = "JB"
-    """ Initials of the author """
+    """Initials of the author"""
 
     # Algorithm specific arguments
     architecture : str = "PPO_default"
@@ -129,7 +127,7 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
-    
+
     # Transformer
     emb_dim: int = 128
     """input embedding size of the transformer"""
@@ -149,20 +147,27 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 global args
-        
-def make_env(env_id, idx, capture_video, run_dir, window_size):
+
+def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
+             window_size=4):
     def thunk():
         logger.set_level(args.logging_level)
         if args.backend == "HackAtari":
             logger.info("Using Hackatari backend")
-            env = HackAtari(env_id, modifs=args.modifs.split(" "), rewardfunc_path=args.new_rf, mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False, frameskip=args.frameskip)
+            from hackatari.core import HackAtari
+            env = HackAtari(env_id, modifs=args.modifs.split(" "),
+                            rewardfunc_path=args.new_rf, mode="ram",
+                            hud=False, render_mode="rgb_array",
+                            render_oc_overlay=False, frameskip=args.frameskip)
         elif args.backend == "OCALLM":
             logger.info("Using RLLM backend")
             from submodules.OC_RLLM.ocallm.core import RLLMEnv
             from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
-            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
+            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False,
+                          render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == "OCAtari":
             logger.info("Using OCAtari backend")
+            from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
@@ -171,25 +176,17 @@ def make_env(env_id, idx, capture_video, run_dir, window_size):
             )
         else:
             raise ValueError("Unknown Backend")
-        
-        if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/videos",
-                                           disable_logger=True)
 
-        a = os.path.join(Path(__file__).parent.resolve(),"")
-        print(a)
-        sys.path.insert(1, a)
+        if capture_video and idx == 0:
+            env = gym.wrappers.RecordVideo(env,
+                                           f"{run_dir}/media/videos",
+                                           disable_logger=True)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
-        #env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        #env = ClipRewardEnv(env)
-        #env = gym.wrappers.ResizeObservation(env, (84, 84))
-        #env = gym.wrappers.GrayScaleObservation(env)
-        #env = gym.wrappers.FrameStack(env, 4)
 
         if args.architecture == "Transformer":
             env = OCWrapper(env)
@@ -199,13 +196,48 @@ def make_env(env_id, idx, capture_video, run_dir, window_size):
     return thunk
 
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+class PPOAgent(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            nn.ReLU(),
+        )
+        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
+
+    def get_value(self, x):
+        return self.critic(self.network(x / 255.0))
+
+    def get_action_and_value(self, x, action=None):
+        hidden = self.network(x / 255.0)
+        logits = self.actor(hidden)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    
+
     if args.track:
         import wandb
 
@@ -217,18 +249,18 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            dir=args.wandb_dir
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"wandb/{run_name}"
+        writer_dir = f"{args.wandb_dir}/{run_name}"
         postfix = None
 
     writer = SummaryWriter(writer_dir)
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join(
-            [f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # Create RTPT object
@@ -251,7 +283,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir, args.buffer_window_size) for i in range(0, args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0,args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
@@ -292,7 +324,7 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
-    for iteration in pbar:    # Annealing the rate if instructed to do so.
+    for iteration in pbar:  # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
@@ -331,7 +363,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_reward"]
                         else:
-                            eorgr += info["episode"]["r"].item()
+                            eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
        
         # bootstrap value if not done
@@ -422,8 +454,8 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr/count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr/count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
-            pbar.set_description(f"Reward: {eorgr / count:.1f}")
-        
+            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
+
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
@@ -450,10 +482,17 @@ if __name__ == "__main__":
         mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
         wandb.log({"FinalReward": mean})
 
-        artifact = wandb.Artifact('model', type='model')
-        artifact.add_file(model_path)
-        # wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
-        wandb.log_artifact(artifact)
+        # model
+        name = f"{args.exp_name}_s{args.seed}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
+        # video
+        if args.capture_video:
+            import glob
+            list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
+            latest_video = max(list_of_videos, key=os.path.getctime)
+            wandb.log({"video": wandb.Video(latest_video)})
+
         wandb.finish()
 
     envs.close()

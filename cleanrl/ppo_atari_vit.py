@@ -10,7 +10,6 @@ import numpy as np
 
 from tqdm import tqdm
 from rtpt import RTPT
-from pathlib import Path
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -23,13 +22,12 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
-    ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
-    MaxAndSkipEnv,
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
+from stable_baselines3.common.evaluation import evaluate_policy
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
@@ -37,10 +35,7 @@ if oc_atari_dir is not None:
     a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocatari.core import OCAtari
-
 from vit_pytorch import SimpleViT
-
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -84,7 +79,9 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    wandb_dir: str = None
+    """the wandb directory"""
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
@@ -162,6 +159,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
                           render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == 0:
             logger.info("Using OCAtari backend")
+            from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
@@ -172,19 +170,15 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
             raise ValueError("Unknown Backend")
 
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/videos",
+            env = gym.wrappers.RecordVideo(env,
+                                           f"{run_dir}/media/videos",
                                            disable_logger=True)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
-        # env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        # env = ClipRewardEnv(env)
-        # env = gym.wrappers.ResizeObservation(env, (84, 84))
-        # env = gym.wrappers.GrayScaleObservation(env)
-        # env = gym.wrappers.FrameStack(env, 4)
 
         return env
 
@@ -201,6 +195,7 @@ class PPOAgent(nn.Module):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
                  buffer_window_size, device):
         super().__init__()
+        self.device = device
 
         self.network = nn.Sequential(
             SimpleViT(
@@ -229,6 +224,10 @@ class PPOAgent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
+    def predict(self, x, states=None, **_):
+        with torch.no_grad():
+            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -248,11 +247,12 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            dir=args.wandb_dir
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"wandb/{run_name}"
+        writer_dir = f"{args.wandb_dir}/{run_name}"
         postfix = None
 
     writer = SummaryWriter(writer_dir)
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials='CD', experiment_name='OCRLAtari',
+    rtpt = RTPT(name_initials='CD', experiment_name='ViT_Atari',
                 max_iterations=args.num_iterations)
 
     # Start the RTPT tracking
@@ -349,7 +349,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_reward"]
                         else:
-                            eorgr += info["episode"]["r"].item()
+                            eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
                         # writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
                         # writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
@@ -443,7 +443,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_NewRF", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_OrgRF", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -467,10 +467,21 @@ if __name__ == "__main__":
     logger.info(f"model saved to {model_path} in epoch {epoch}")
 
     if args.track:
-        artifact = wandb.Artifact('model', type='model')
-        artifact.add_file(model_path)
-        # wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
-        wandb.log_artifact(artifact)
+        # final performance
+        mean, std = evaluate_policy(model=agent, env=envs, n_eval_episodes=1)  # type: ignore
+        wandb.log({"FinalReward": mean})
+
+        # model
+        name = f"{args.exp_name}_s{args.seed}_{args.emb_dim}_{args.num_blocks}_{args.num_heads}_p{args.patch_size}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
+        # video
+        if args.capture_video:
+            import glob
+            list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
+            latest_video = max(list_of_videos, key=os.path.getctime)
+            wandb.log({"video": wandb.Video(latest_video)})
+
         wandb.finish()
 
     envs.close()
