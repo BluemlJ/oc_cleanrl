@@ -81,7 +81,7 @@ class Args:
     """the entity (team) of wandb's project"""
     wandb_dir: str = None
     """the wandb directory"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
@@ -93,7 +93,7 @@ class Args:
     # Algorithm specific arguments
     architecture : str = "PPO_default"
     """Specifies the used architecture"""
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -129,9 +129,9 @@ class Args:
     # Transformer
     emb_dim: int = 128
     """input embedding size of the transformer"""
-    num_heads: int = 8
+    num_heads: int = 64
     """number of multi-attention heads"""
-    num_blocks: int = 4
+    num_blocks: int = 2
     """number of transformer blocks"""
     patch_size: int = 12
     """ViT patch size"""
@@ -255,23 +255,23 @@ if __name__ == "__main__":
 
     if args.architecture == "OCT":
         from architectures.transformer import OCTransformer as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device)
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device).to(device)
     elif args.architecture == "VIT":
         from architectures.transformer import VIT as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                     args.patch_size, args.buffer_window_size, device)
+                     args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "VIT2":
         from architectures.transformer import SimpleViT2 as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                     args.patch_size, args.buffer_window_size, device)
+                     args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "MobileVit":
         from architectures.transformer import MobileVIT as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                     args.patch_size, args.buffer_window_size, device)
+                     args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "MobileVit2":
         from architectures.transformer import MobileViT2 as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                     args.patch_size, args.buffer_window_size, device)
+                     args.patch_size, args.buffer_window_size, device).to(device)
     else:
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
