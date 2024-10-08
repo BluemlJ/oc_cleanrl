@@ -95,7 +95,7 @@ class Args:
     architecture : str = "PPO_default"
     """ Specifies the used archtiecture"""
 
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 200_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -188,7 +188,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        if args.architecture == "Transformer":
+        if args.architecture == "OCT":
             env = OCWrapper(env)
 
         return env
@@ -292,20 +292,28 @@ if __name__ == "__main__":
 
     if args.architecture == "OCT":
         from architectures.transformer import OCTransformer as Agent
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device)
     elif args.architecture == "VIT":
         from architectures.transformer import VIT as Agent
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
+                     args.patch_size, args.buffer_window_size, device)
     elif args.architecture == "VIT2":
         from architectures.transformer import SimpleViT2 as Agent
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
+                     args.patch_size, args.buffer_window_size, device)
     elif args.architecture == "MobileVit":
         from architectures.transformer import MobileVIT as Agent
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
+                     args.patch_size, args.buffer_window_size, device)
     elif args.architecture == "MobileVit2":
         from architectures.transformer import MobileViT2 as Agent
-    else:
-        from architectures.ppo import PPO_default as Agent
-
-
-    agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
                      args.patch_size, args.buffer_window_size, device)
+    else:
+        from architectures.ppo import PPODefault as Agent
+        agent = Agent(envs, device).to(device)
+
+    
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup

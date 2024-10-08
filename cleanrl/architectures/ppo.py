@@ -10,8 +10,10 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class PPODefault(nn.Module):
-    def __init__(self, envs):
+    
+    def __init__(self, envs, device):
         super().__init__()
+        self.device = device
         self.network = nn.Sequential(
             layer_init(nn.Conv2d(4, 32, 8, stride=4)),
             nn.ReLU(),
@@ -36,3 +38,7 @@ class PPODefault(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+    def predict(self, x, states=None, **_):
+        with torch.no_grad():
+            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
