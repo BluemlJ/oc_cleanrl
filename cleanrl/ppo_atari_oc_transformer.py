@@ -7,7 +7,6 @@ import random
 import warnings
 
 import numpy as np
-from stable_baselines3.common.evaluation import evaluate_policy
 
 from tqdm import tqdm
 from rtpt import RTPT
@@ -23,13 +22,12 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
-    ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
-    MaxAndSkipEnv,
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
+from stable_baselines3.common.evaluation import evaluate_policy
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
@@ -37,7 +35,6 @@ if oc_atari_dir is not None:
     a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocatari.core import OCAtari
 from ocrltransformer.wrappers import OCWrapper
 from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
@@ -83,9 +80,9 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    #wandb_dir: str = "wandb"
-    #"""the wandb directory"""
-    capture_video: bool = False
+    wandb_dir: str = None
+    """the wandb directory"""
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
@@ -126,9 +123,6 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-    # Agent
-    architecture = "PPO_default"
-    """ Specifies the used archtiecture"""
     # Transformer
     emb_dim: int = 128
     """input embedding size of the transformer"""
@@ -164,6 +158,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
                           render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == 0:
             logger.info("Using OCAtari backend")
+            from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, mode="ram", hud=False, render_mode="rgb_array",
                 render_oc_overlay=False, obs_mode=args.obs_mode,
@@ -174,19 +169,15 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
             raise ValueError("Unknown Backend")
 
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/videos",
+            env = gym.wrappers.RecordVideo(env,
+                                           f"{run_dir}/media/videos",
                                            disable_logger=True)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
-        # env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        # env = ClipRewardEnv(env)
-        # env = gym.wrappers.ResizeObservation(env, (84, 84))
-        # env = gym.wrappers.GrayScaleObservation(env)
-        # env = gym.wrappers.FrameStack(env, 4)
         env = OCWrapper(env)
 
         return env
@@ -253,7 +244,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            #dir=args.wandb_dir
+            dir=args.wandb_dir
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)
@@ -284,6 +275,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    logger.debug(f"Using device {device}.")
 
     # env setup
     envs = SubprocVecEnv(
@@ -353,7 +345,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_reward"]
                         else:
-                            eorgr += info["episode"]["r"].item()
+                            eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
                         # writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
                         # writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
@@ -447,7 +439,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_NewRF", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_OrgRF", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -475,10 +467,17 @@ if __name__ == "__main__":
         mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
         wandb.log({"FinalReward": mean})
 
-        artifact = wandb.Artifact('model', type='model')
-        artifact.add_file(model_path)
-        # wandb.log({f"runs/{run_name}/{args.exp_name}": wandb.Video(f"videos/{run_name}")})
-        wandb.log_artifact(artifact)
+        # model
+        name = f"{args.exp_name}_s{args.seed}_{args.emb_dim}_{args.num_blocks}_{args.num_heads}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
+        # video
+        if args.capture_video:
+            import glob
+            list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
+            latest_video = max(list_of_videos, key=os.path.getctime)
+            wandb.log({"video": wandb.Video(latest_video)})
+
         wandb.finish()
 
     envs.close()
