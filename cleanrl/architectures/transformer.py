@@ -1,12 +1,9 @@
+import numpy as np
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from torch.distributions.categorical import Categorical
-
-from ocatari.core import OCAtari
-from ocrltransformer.wrappers import OCWrapper
 from torch.nn import TransformerEncoderLayer, TransformerEncoder
+from torch.distributions.categorical import Categorical
 
 from vit_pytorch import SimpleViT
 from vit_pytorch.mobile_vit import MobileViT
@@ -140,14 +137,14 @@ class MobileViT2(nn.Module):
         )
 
     def get_value(self, x):
-        return (self.network(x))
+        return self.network(x)
 
     def get_action_and_value(self, x, action=None):
         logits = self.network(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+        return action, probs.log_prob(action), probs.entropy(), self.critic(logits)
 
     def predict(self, x, states=None, **_):
         with torch.no_grad():
@@ -173,7 +170,7 @@ class SimpleViT2(nn.Module):
         )
 
     def get_value(self, x):
-        return (self.network(x))
+        return self.network(x)
 
     def get_action_and_value(self, x, action=None):
         return self.get_value(x),0,0,0
