@@ -74,7 +74,7 @@ class Args:
     """the frame skipping option of the environment"""
 
     # Tracking
-    track: bool = True
+    track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "OC-Transformer"
     """the wandb's project name"""
@@ -133,7 +133,7 @@ class Args:
     """input embedding size of the transformer"""
     num_heads: int = 64
     """number of multi-attention heads"""
-    num_blocks: int = 2
+    num_blocks: int = 1
     """number of transformer blocks"""
     patch_size: int = 12
     """ViT patch size"""
@@ -272,11 +272,12 @@ if __name__ == "__main__":
     logger.set_level(args.logging_level)
 
     # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
+    torch.use_deterministic_algorithms(args.torch_deterministic)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-
+    torch.backends.cudnn.benchmark = False
+    random.seed(args.seed)
+    
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
@@ -288,6 +289,8 @@ if __name__ == "__main__":
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
     envs.seed(args.seed)
+    envs.action_space.seed(args.seed)
+    
     #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     if args.architecture == "OCT":
