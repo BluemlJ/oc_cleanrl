@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
     EpisodicLifeEnv,
@@ -58,7 +57,7 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "dqn"
+    obs_mode: str = "obj"
     """observation mode for OCAtari"""
     feature_func: str = ""
     """the object features to use as observations"""
@@ -93,8 +92,7 @@ class Args:
 
     # Algorithm specific arguments
     architecture : str = "PPO_default"
-    """ Specifies the used archtiecture"""
-
+    """Specifies the used architecture"""
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
@@ -196,41 +194,6 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
     return thunk
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class PPOAgent(nn.Module):
-    def __init__(self, envs):
-        super().__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
-        )
-        self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-
-    def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
-
-    def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-
-
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -316,7 +279,7 @@ if __name__ == "__main__":
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
 
-    
+
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
