@@ -28,6 +28,7 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.utils import set_random_seed
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
@@ -240,6 +241,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
     torch.backends.cudnn.benchmark = False
     random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_random_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
@@ -453,6 +456,7 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
+        agent.eval()
         mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
         wandb.log({"FinalReward": mean})
 
