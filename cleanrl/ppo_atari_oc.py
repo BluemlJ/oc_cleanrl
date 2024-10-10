@@ -242,6 +242,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
     torch.backends.cudnn.benchmark = False
     random.seed(args.seed)
+    np.random.seed(args.seed)
     set_random_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -462,6 +463,7 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
+        agent.eval()
         mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
         wandb.log({"FinalReward": mean})
 
