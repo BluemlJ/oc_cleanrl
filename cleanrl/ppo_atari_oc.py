@@ -28,6 +28,7 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.utils import set_random_seed
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
@@ -57,7 +58,7 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "obj"
+    obs_mode: str = "dqn"
     """observation mode for OCAtari"""
     feature_func: str = ""
     """the object features to use as observations"""
@@ -91,8 +92,9 @@ class Args:
     """Initials of the author"""
 
     # Algorithm specific arguments
-    architecture : str = "PPO_default"
-    """Specifies the used architecture"""
+    architecture : str = "PPODefault"
+    """ Specifies the used archtiecture"""
+
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
@@ -240,6 +242,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
     torch.backends.cudnn.benchmark = False
     random.seed(args.seed)
+    set_random_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
@@ -275,11 +278,14 @@ if __name__ == "__main__":
         from architectures.transformer import MobileViT2 as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
                      args.patch_size, args.buffer_window_size, device).to(device)
-    else:
+    elif args.architecture == "PPO":
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
+    else:
+        from architectures.ppo import PPO_Obj as Agent
+        agent = Agent(envs, device).to(device)
 
-
+    
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -327,7 +333,10 @@ if __name__ == "__main__":
             # next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
-              
+
+            # Paint Obsstate
+            
+
             if 1 in next_done:
                 for info in infos:
                     if "episode" in info:
