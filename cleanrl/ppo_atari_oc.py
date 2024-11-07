@@ -1,10 +1,15 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import sys
 import tyro
 import time
 import random
-import warnings
 
 import numpy as np
 
@@ -36,11 +41,6 @@ if oc_atari_dir is not None:
     a = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocrltransformer.wrappers import OCWrapper
-
-
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
 
 
 @dataclass
@@ -92,7 +92,7 @@ class Args:
     """Initials of the author"""
 
     # Algorithm specific arguments
-    architecture : str = "PPODefault"
+    architecture : str = "PPO"
     """ Specifies the used archtiecture"""
 
     total_timesteps: int = 10_000_000
@@ -152,19 +152,13 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
              window_size=4):
     def thunk():
         logger.set_level(args.logging_level)
-        if args.backend == "HackAtari":
+        if args.backend == "HackAtari" or args.backend == "OCALM":
             logger.info("Using Hackatari backend")
             from hackatari.core import HackAtari
             env = HackAtari(env_id, modifs=args.modifs.split(" "),
-                            rewardfunc_path=args.new_rf, mode="ram",
+                            rewardfunc_path=args.new_rf, mode="ram",obs_mode=args.obs_mode,
                             hud=False, render_mode="rgb_array",
                             render_oc_overlay=False, frameskip=args.frameskip)
-        elif args.backend == "OCALLM":
-            logger.info("Using RLLM backend")
-            from submodules.OC_RLLM.ocallm.core import RLLMEnv
-            from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
-            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False,
-                          render_mode="rgb_array", render_oc_overlay=False)
         elif args.backend == "OCAtari":
             logger.info("Using OCAtari backend")
             from ocatari.core import OCAtari
@@ -176,6 +170,9 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             )
         else:
             raise ValueError("Unknown Backend")
+
+        if args.architecture == "OCTransformer":
+            from ocrltransformer.wrappers import OCWrapper
 
         if capture_video and idx == 0:
             env = gym.wrappers.RecordVideo(env,
