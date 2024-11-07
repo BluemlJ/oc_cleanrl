@@ -152,7 +152,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
              window_size=4):
     def thunk():
         logger.set_level(args.logging_level)
-        if args.backend == "HackAtari" or args.backend == "OCALM":
+        if args.backend == "HackAtari":
             logger.info("Using Hackatari backend")
             from hackatari.core import HackAtari
             env = HackAtari(env_id, modifs=args.modifs.split(" "),
@@ -340,9 +340,9 @@ if __name__ == "__main__":
                     if "episode" in info:
                         count +=1
                         done_in_episode=True
-                        if args.backend == 1 or (args.backend == 2 and args.new_rf):
+                        if args.new_rf:
                             enewr += info["episode"]["r"]
-                            eorgr += info["org_reward"]
+                            eorgr += info["org_return"]
                         else:
                             eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
@@ -431,11 +431,11 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if done_in_episode:
-            if args.backend == 1 or (args.backend == 2 and args.new_rf):
+            if args.new_rf:
                 writer.add_scalar("charts/Episodic_New_Reward", enewr/count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr/count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
-            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
+            pbar.set_description(f"Reward: {eorgr/ count:.1f}")
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
