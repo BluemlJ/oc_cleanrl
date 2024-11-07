@@ -40,7 +40,9 @@ if oc_atari_dir is not None:
     a = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, a)
 
-from cleanrl_utils.evals.generic_eval import evaluate
+a = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
+sys.path.insert(1, a)
+from generic_eval import evaluate
 
 
 
@@ -345,7 +347,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_return"]
                         else:
-                            eorgr += info["episode"]["r"]
+                            eorgr += info["episode"]["r"].item()
                         elength += info["episode"]["l"]
        
         # bootstrap value if not done
