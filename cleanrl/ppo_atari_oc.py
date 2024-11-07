@@ -32,7 +32,6 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.utils import set_random_seed
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
@@ -40,6 +39,8 @@ oc_atari_dir = os.getenv("OC_ATARI_DIR")
 if oc_atari_dir is not None:
     a = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, a)
+
+from cleanrl_utils.evals.generic_eval import evaluate
 
 
 
@@ -165,7 +166,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
-                    # logger=logger, feature_func=feature_func,
+                    # logger=logger, feature_attr=feature_func,
                     # buffer_window_size=window_size
             )
         else:
@@ -248,7 +249,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0,args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func) for i in range(0,args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
@@ -460,9 +461,13 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
-        agent.eval()
-        mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
-        wandb.log({"FinalReward": mean})
+        rewards = evaluate(agent, make_env, 10,
+                           env_id=args.env_id,
+                           capture_video=args.capture_video,
+                           run_dir=writer_dir,
+                           feature_func=args.feature_func)
+
+        wandb.log({"FinalReward": np.mean(rewards)})
 
         # model
         name = f"{args.exp_name}_s{args.seed}"
