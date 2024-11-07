@@ -40,8 +40,9 @@ if oc_atari_dir is not None:
     a = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, a)
 
-from cleanrl_utils.evals.generic_eval import evaluate
-
+a = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
+sys.path.insert(1, a)
+from generic_eval import evaluate  # noqa
 
 
 @dataclass
@@ -166,14 +167,11 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
-                    # logger=logger, feature_attr=feature_func,
+                    logger=logger, feature_attr=feature_func,
                     # buffer_window_size=window_size
             )
         else:
             raise ValueError("Unknown Backend")
-
-        if args.architecture == "OCTransformer":
-            from ocrltransformer.wrappers import OCWrapper
 
         if capture_video and idx == 0:
             env = gym.wrappers.RecordVideo(env,
@@ -187,6 +185,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             env = FireResetEnv(env)
 
         if args.architecture == "OCT":
+            from ocrltransformer.wrappers import OCWrapper
             env = OCWrapper(env)
 
         return env
