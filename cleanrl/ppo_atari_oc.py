@@ -168,7 +168,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
-                    logger=logger, feature_attr=feature_func,
+                    # logger=logger, feature_attr=feature_func,
                     # buffer_window_size=window_size
             )
         else:
@@ -239,9 +239,10 @@ if __name__ == "__main__":
     torch.use_deterministic_algorithms(args.torch_deterministic)
     torch.backends.cudnn.deterministic = args.torch_deterministic
     torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed_all(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
-    set_random_seed(args.seed)
+    set_random_seed(args.seed, args.cuda)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
