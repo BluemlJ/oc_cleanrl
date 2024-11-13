@@ -42,8 +42,7 @@ if oc_atari_dir is not None:
 
 a = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, a)
-from generic_eval import evaluate
-
+from generic_eval import evaluate  # noqa
 
 
 @dataclass
@@ -250,7 +249,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func) for i in range(0,args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func, args.buffer_window_size) for i in range(0,args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
@@ -346,7 +345,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_return"]
                         else:
-                            eorgr += info["episode"]["r"].item()
+                            eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
        
         # bootstrap value if not done
@@ -437,7 +436,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr/count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr/count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
-            pbar.set_description(f"Reward: {eorgr/ count:.1f}")
+            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -462,11 +461,13 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
+        args.new_rf = ""
         rewards = evaluate(agent, make_env, 10,
                            env_id=args.env_id,
                            capture_video=args.capture_video,
                            run_dir=writer_dir,
-                           feature_func=args.feature_func)
+                           feature_func=args.feature_func,
+                           window_size=args.buffer_window_size)
 
         wandb.log({"FinalReward": np.mean(rewards)})
 
