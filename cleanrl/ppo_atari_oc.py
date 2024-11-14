@@ -167,7 +167,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
                     render_oc_overlay=False, obs_mode=args.obs_mode,
-                    # logger=logger, feature_attr=feature_func,
+                    logger=logger, feature_attr=feature_func,
                     # buffer_window_size=window_size
             )
         else:
