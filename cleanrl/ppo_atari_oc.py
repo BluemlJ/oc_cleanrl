@@ -232,20 +232,6 @@ if __name__ == "__main__":
     rtpt.start()
 
     logger.set_level(args.logging_level)
-
-<<<<<<< HEAD
-    # TRY NOT TO MODIFY: seeding
-    os.environ['PYTHONHASHSEED'] = str(args.seed)
-    torch.use_deterministic_algorithms(args.torch_deterministic)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-    torch.backends.cudnn.benchmark = False
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    set_random_seed(args.seed, args.cuda)
-    torch.cuda.manual_seed_all(args.seed)
-=======
-    
->>>>>>> 15eba18537d77edd70f54e3cb8a2aa8bb3ebf7c9
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
@@ -360,7 +346,7 @@ if __name__ == "__main__":
                             enewr += info["episode"]["r"]
                             eorgr += info["org_return"]
                         else:
-                            eorgr += info["episode"]["r"]
+                            eorgr += info["episode"]["r"].item()
                         elength += info["episode"]["l"]
        
         # bootstrap value if not done
@@ -451,7 +437,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr/count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr/count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength/count, global_step)
-            pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
+            pbar.set_description(f"Reward: {eorgr / count:.1f}")
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
