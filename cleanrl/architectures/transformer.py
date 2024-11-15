@@ -15,6 +15,28 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model)).unsqueeze(0)
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
+
 class OCTransformer(nn.Module):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
         super().__init__()
@@ -26,7 +48,13 @@ class OCTransformer(nn.Module):
                                                 dropout=0.1, batch_first=True)
 
         self.network = nn.Sequential(
-            nn.Linear(dims[1], emb_dim, device=device),
+            layer_init(nn.Linear(dims[1], emb_dim, device=device)),
+            # nn.ReLU(),
+            # layer_init(nn.Linear(emb_dim, 16, device=device)),
+            # nn.ReLU(),
+            # layer_init(nn.Linear(16, emb_dim, device=device)),
+            # nn.ReLU(),
+            # PositionalEncoding(emb_dim, 0.0, dims[0]),
             TransformerEncoder(encoder_layer, num_blocks),
             nn.Flatten(),
         )
@@ -43,10 +71,6 @@ class OCTransformer(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
 
 class VIT(nn.Module):
@@ -81,11 +105,6 @@ class VIT(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-    
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
-
 
 
 class MobileVIT(nn.Module):
@@ -116,11 +135,6 @@ class MobileVIT(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-    
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
-
 
 
 class MobileViT2(nn.Module):
@@ -146,11 +160,6 @@ class MobileViT2(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(logits)
 
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
-
-
 
 class SimpleViT2(nn.Module):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
@@ -174,8 +183,3 @@ class SimpleViT2(nn.Module):
 
     def get_action_and_value(self, x, action=None):
         return self.get_value(x),0,0,0
-
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
-

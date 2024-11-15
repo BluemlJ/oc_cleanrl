@@ -72,7 +72,7 @@ class Args:
     """Modifications for Hackatari"""
     new_rf: str = ""
     """Path to a new reward functions for OCALM and HACKATARI"""
-    frameskip: int = -1
+    frameskip: int = 4
     """the frame skipping option of the environment"""
 
     # Tracking
@@ -233,6 +233,7 @@ if __name__ == "__main__":
 
     logger.set_level(args.logging_level)
 
+<<<<<<< HEAD
     # TRY NOT TO MODIFY: seeding
     os.environ['PYTHONHASHSEED'] = str(args.seed)
     torch.use_deterministic_algorithms(args.torch_deterministic)
@@ -242,6 +243,9 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     set_random_seed(args.seed, args.cuda)
     torch.cuda.manual_seed_all(args.seed)
+=======
+    
+>>>>>>> 15eba18537d77edd70f54e3cb8a2aa8bb3ebf7c9
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
@@ -253,6 +257,15 @@ if __name__ == "__main__":
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
+    # TRY NOT TO MODIFY: seeding
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
+    torch.use_deterministic_algorithms(args.torch_deterministic)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
     
