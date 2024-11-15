@@ -84,14 +84,13 @@ class PPO_Obj(nn.Module):
         self.network = nn.Sequential(
             layer_init(nn.Linear(4,32)),
             nn.ReLU(),
-            layer_init(nn.Linear(32,64)),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
-            layer_init(nn.Linear(64,64)),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64*4*3, 512)),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
             nn.ReLU(),
-            
         )
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)

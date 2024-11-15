@@ -238,10 +238,10 @@ if __name__ == "__main__":
     torch.use_deterministic_algorithms(args.torch_deterministic)
     torch.backends.cudnn.deterministic = args.torch_deterministic
     torch.backends.cudnn.benchmark = False
-    torch.cuda.manual_seed_all(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
     set_random_seed(args.seed, args.cuda)
+    torch.cuda.manual_seed_all(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
@@ -280,9 +280,11 @@ if __name__ == "__main__":
     elif args.architecture == "PPO":
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
-    else:
+    elif args.architecture == "PPO_OBJ":
         from architectures.ppo import PPO_Obj as Agent
         agent = Agent(envs, device).to(device)
+    else:
+        raise NotImplementedError
 
     
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
