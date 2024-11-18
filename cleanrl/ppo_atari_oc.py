@@ -151,14 +151,15 @@ class Args:
 global args
 
 def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
-             window_size=4):
+             window_size=4, frameskip=4):
     def thunk():
         logger.set_level(args.logging_level)
         if args.backend == "HackAtari":
             logger.info("Using Hackatari backend")
             from hackatari.core import HackAtari
-            env = HackAtari(env_id, modifs=args.modifs.split(" "),
-                            rewardfunc_path=args.new_rf, mode="ram",obs_mode=args.obs_mode,
+            modifs = [i for i in args.modifs.split(" ") if i]
+            env = HackAtari(env_id, modifs=modifs,
+                            rewardfunc_path=args.new_rf, obs_mode=args.obs_mode,
                             hud=False, render_mode="rgb_array",
                             render_oc_overlay=False, frameskip=args.frameskip)
         elif args.backend == "OCAtari":
@@ -166,10 +167,16 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
             from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, hud=False, render_mode="rgb_array",
-                    render_oc_overlay=False, obs_mode=args.obs_mode,
+                    render_oc_overlay=False, obs_mode=args.obs_mode, frameskip=args.frameskip, 
                     # logger=logger, feature_attr=feature_func,
                     # buffer_window_size=window_size
             )
+        elif args.backend == "Gym":
+            logger.info("Using Gymnasium backend")
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
+            env = gym.wrappers.ResizeObservation(env, (84, 84))
+            env = gym.wrappers.GrayScaleObservation(env)
+            env = gym.wrappers.FrameStack(env, 4)
         else:
             raise ValueError("Unknown Backend")
 
@@ -226,7 +233,7 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials=args.author, experiment_name='OCAtari',
+    rtpt = RTPT(name_initials=args.author, experiment_name='OCALM',
                 max_iterations=args.num_iterations)
     # Start the RTPT tracking
     rtpt.start()
@@ -239,7 +246,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func, args.buffer_window_size) for i in range(0,args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func, args.buffer_window_size, args.frameskip) for i in range(0,args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
     
