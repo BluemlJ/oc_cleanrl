@@ -93,7 +93,7 @@ class Args:
     """Initials of the author"""
 
     # Algorithm-specific arguments
-    architecture: str = "PPO"
+    architecture: str = "DQN"
     """Specifies the used architecture"""
 
     total_timesteps: int = 10_000_000
@@ -187,6 +187,9 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
 
     return thunk
 
+def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
+    slope = (end_e - start_e) / duration
+    return max(slope * t + start_e, end_e)
 
 if __name__ == "__main__":
     
@@ -198,7 +201,7 @@ if __name__ == "__main__":
     # Create RTPT object to monitor progress with estimated time remaining
     rtpt = RTPT(
         name_initials=args.author, experiment_name="OCALM",
-        max_iterations=args.num_iterations
+        max_iterations=args.total_timesteps
     )
     rtpt.start()  # Start RTPT tracking
 
@@ -265,8 +268,8 @@ if __name__ == "__main__":
 
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
         device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
@@ -290,18 +293,21 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     # Iterate through training iterations with progress bar
-    pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
-    for iteration in pbar:  # Anneal learning rate if specified
-        if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+    #pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
+    #for iteration in pbar:  # Anneal learning rate if specified
+    #    if args.anneal_lr:
+    #        frac = 1.0 - (iteration - 1.0) / args.num_iterations
+    #        lrnow = frac * args.learning_rate
+    #        optimizer.param_groups[0]["lr"] = lrnow
 
         elength = 0
         eorgr = 0
         enewr = 0
         count = 0
         done_in_episode = False
+
+    obs = envs.reset()
+    for global_step in range(args.total_timesteps):
 
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
@@ -317,27 +323,21 @@ if __name__ == "__main__":
         next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
         
         # Track episode-level statistics if a game is done
-            if 1 in next_done:
-                for info in infos:
-                    if "episode" in info:
-                        count += 1
-                        done_in_episode = True
-                        if args.new_rf:
-                            enewr += info["episode"]["r"]
-                            eorgr += info["org_return"]
-                        else:
-                            eorgr += info["episode"]["r"].item()
-                        elength += info["episode"]["l"]
-                    
-                    
-
+        if 1 in next_done:
+            for info in infos:
+                if "episode" in info:
+                    count += 1
+                    done_in_episode = True
+                    if args.new_rf:
+                        enewr += info["episode"]["r"]
+                        eorgr += info["org_return"]
+                    else:
+                        eorgr += info["episode"]["r"].item()
+                    elength += info["episode"]["l"]
+                
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
-        real_next_obs = next_obs.copy()
-        for idx, trunc in enumerate(truncations):
-            if trunc:
-                real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, reward, next_done, infos)
-
+        rb.add(obs, next_obs, actions, reward, next_done, infos)
+                    
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
 
@@ -356,22 +356,11 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
-                # Log episode statistics for Tensorboard
-                if done_in_episode:
-                    if args.new_rf:
-                        writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
-                    writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
-                    writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-                    pbar.set_description(f"Reward: {eorgr / count:.1f}")
                     
                 # optimize the model
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
-                # Update RTPT for progress tracking
-                rtpt.step()
 
             # update target network
             if global_step % args.target_network_frequency == 0:
@@ -379,6 +368,22 @@ if __name__ == "__main__":
                     target_network_param.data.copy_(
                         args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
                     )
+            
+        # Log episode statistics for Tensorboard
+        if done_in_episode:
+            if args.new_rf:
+                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
+            writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
+            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
+            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            elength = 0
+            eorgr = 0
+            enewr = 0
+            count = 0
+            done_in_episode = False
+
+        # Update RTPT for progress tracking
+        rtpt.step()
 
     # Save the trained model to disk
     model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"

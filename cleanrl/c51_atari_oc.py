@@ -1,76 +1,106 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/c51/#c51_ataripy
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
+import warnings
 import os
-import random
+import sys
 import time
+import random
 from dataclasses import dataclass
+from pathlib import Path
 
-import gymnasium as gym
+import tyro
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import tyro
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
-    MaxAndSkipEnv,
     NoopResetEnv,
 )
 from stable_baselines3.common.buffers import ReplayBuffer
-from torch.utils.tensorboard import SummaryWriter
-
+from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
+from stable_baselines3.common.utils import set_random_seed
 from rtpt import RTPT
-import random
-import time
+import gymnasium as gym
+from gymnasium import logger
 
-import sys
-from pathlib import Path
-import os
+# Suppress warnings to avoid cluttering output
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-a = os.path.join(Path(__file__).parent.parent.resolve(),"")
-sys.path.insert(1, a)
+# Set CUDA environment variable for determinism
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-from submodules.OC_RLLM.ocallm.core import RLLMEnv
-from submodules.HackAtari.hackatari.core import HackAtari
-from submodules.OC_RLLM.get_reward_function import get_reward_function as grf
-from submodules.OC_Atari.ocatari.core import OCAtari
-from submodules.OC_Atari.ocatari.core import EasyDonkey as ed
+# Add custom paths if OC_ATARI_DIR is set (optional integration for extended functionality)
+oc_atari_dir = os.getenv("OC_ATARI_DIR")
+if oc_atari_dir is not None:
+    oc_atari_path = os.path.join(Path(__file__), oc_atari_dir)
+    sys.path.insert(1, oc_atari_path)
 
+# Add the evaluation directory to the Python path to import custom evaluation functions
+eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
+sys.path.insert(1, eval_dir)
+from generic_eval import evaluate  # noqa
 
+# Command line argument configuration using dataclass
 @dataclass
 class Args:
+    # General
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 42
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+
+    # Environment parameters
+    env_id: str = "ALE/Pong-v5"
+    """the id of the environment"""
+    obs_mode: str = "dqn"
+    """observation mode for OCAtari"""
+    feature_func: str = ""
+    """the object features to use as observations"""
+    buffer_window_size: int = 4
+    """length of history in the observations"""
+    backend: str = "OCAtari"
+    """Which Backend should we use"""
+    modifs: str = ""
+    """Modifications for Hackatari"""
+    new_rf: str = ""
+    """Path to a new reward functions for OCALM and HACKATARI"""
+    frameskip: int = 4
+    """the frame skipping option of the environment"""
+
+    # Tracking (Logging and monitoring configurations)
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "OC-Transformer"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
+    wandb_dir: str = None
+    """the wandb directory"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
-    """whether to save model into the `runs/{run_name}` folder"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
-    backend: int = 0
-    '''Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI'''
-    modifs: str = ""
+    ckpt: str = ""
+    """Path to a checkpoint to a model to start training from"""
+    logging_level: int = 40
+    """Logging level for the Gymnasium logger"""
+    author : str = "JB"
+    """Initials of the author"""
 
-    # Algorithm specific arguments
-    env_id: str = "BreakoutNoFrameskip-v4"
-    """the id of the environment"""
-    total_timesteps: int = 10000000
+        # Algorithm-specific arguments
+    architecture: str = "DQN"
+    """Specifies the used architecture"""
+
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
+    learning_rate: float = 2.5e-4
+    """the learning rate of the optimizer"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
@@ -81,7 +111,7 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-    buffer_size: int = 100000
+    buffer_size: int = 1000000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -100,123 +130,87 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
+# Global variable to hold parsed arguments
+global args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+# Function to create a gym environment with the specified settings
+def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_size=4, frameskip=4):
+    """
+    Creates a gym environment with the specified settings.
+    """
+
     def thunk():
-
-        if args.backend == 2:
-            print("Hackatari")
-            env = HackAtari(env_id, modifs=args.modifs.split(" "), mode="ram", hud=False, render_mode="rgb_array", render_oc_overlay=False)
-        elif args.backend == 1:
-            print("RLLM")
-            env = RLLMEnv(env_id, "ram", grf(env_id), hud=False, render_mode="rgb_array", render_oc_overlay=False )
-        elif args.backend == 0:
-            print("OCATARI")
-            env = OCAtari(env_id, mode="ram", obs_mode="dqn", hud=False, render_mode="rgb_array", render_oc_overlay=False)
-            #env = ed(render_mode="rgb_array")
-            # env = ek(render_mode="rgb_array")
+        logger.set_level(args.logging_level)
+        # Setup environment based on backend type (HackAtari, OCAtari, Gym)
+        if args.backend == "HackAtari":
+            from hackatari.core import HackAtari
+            modifs = [i for i in args.modifs.split(" ") if i]
+            env = HackAtari(
+                env_id,
+                modifs=modifs,
+                rewardfunc_path=args.new_rf,
+                obs_mode=args.obs_mode,
+                hud=False,
+                render_mode="rgb_array",
+                frameskip=args.frameskip
+            )
+        elif args.backend == "OCAtari":
+            from ocatari.core import OCAtari
+            env = OCAtari(
+                env_id,
+                hud=False,
+                render_mode="rgb_array",
+                obs_mode=args.obs_mode,
+                frameskip=args.frameskip
+            )
+        elif args.backend == "Gym":
+            # Use Gym backend with image preprocessing wrappers
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
+            env = gym.wrappers.ResizeObservation(env, (84, 84))
+            env = gym.wrappers.GrayScaleObservation(env)
+            env = gym.wrappers.FrameStack(env, 4)
         else:
             raise ValueError("Unknown Backend")
 
+        # Capture video if required
         if capture_video and idx == 0:
-            #env = gym.make(env_id, render_mode="rgb_array")
-            #env = ed(render_mode="rgb_array")
-            #env = RLLMEnv("Pong", "revised", pong_cr, hud=False, render_mode="human")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        #else:
-            #env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos", disable_logger=True)
 
+        # Apply standard Atari environment wrappers
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
-        #env = MaxAndSkipEnv(env, skip=1)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = ClipRewardEnv(env)
-        #env = gym.wrappers.ResizeObservation(env, (84, 84))
-        #env = gym.wrappers.GrayScaleObservation(env)
-        #env = gym.wrappers.FrameStack(env, 4)
             
-        env.action_space.seed(seed)
         return env
 
     return thunk
 
 
 # ALGO LOGIC: initialize agent here:
-class QNetwork(nn.Module):
-    def __init__(self, env, n_atoms=101, v_min=-100, v_max=100):
-        super().__init__()
-        self.env = env
-        self.n_atoms = n_atoms
-        self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
-        self.n = env.single_action_space.n
-        
-        self.__features = nn.Sequential(
-            nn.Conv2d(4, 32, kernel_size=8, stride=4),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(inplace=True),
-        )
-        self.__head = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 512), nn.ReLU(inplace=True), nn.Linear(512, self.n * n_atoms),
-        )
-
-        #self.__features = nn.Sequential(
-        #    nn.Linear(4, 16),
-        #    nn.ReLU(inplace=True),
-        #    nn.Linear(16, 64),
-        #    nn.ReLU(inplace=True),
-        #    nn.Linear(64, 64),
-        #    nn.ReLU(inplace=True),
-        #    nn.Linear(64, 64),
-        #    nn.ReLU(inplace=True),
-        #)
-        #self.__head = nn.Sequential(
-        #    nn.Linear(64 * 12, 1024), nn.ReLU(inplace=True), nn.Linear(1024, self.n * n_atoms),
-        #)
-
-    def get_action(self, x, action=None):
-        y = self.__features(x / 255.0)
-        logits = self.__head(y.view(y.size(0), -1))
-        # probability mass function for each action
-        pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
-        q_values = (pmfs * self.atoms).sum(2)
-        if action is None:
-            action = torch.argmax(q_values, 1)
-        return action, pmfs[torch.arange(len(x)), action]
-
+from architectures.dqn import QNetwork_C51 as QNetwork
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
-
-
-if __name__ == "__main__":
-    import stable_baselines3 as sb3
-
-    if sb3.__version__ < "2.0":
-        raise ValueError(
-            """Ongoing migration: run the following command to install the new dependencies:
-
-poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-license]==0.28.1"  "ale-py==0.8.1" 
-"""
-        )
     
-    # Create RTPT object
-    rtpt = RTPT(name_initials='JB', experiment_name='TrainingAtari', max_iterations=1)
-
-    # Start the RTPT tracking
-    rtpt.start()
-
-
-
+if __name__ == "__main__":
+    
+    # Parse command-line arguments using Tyro
     args = tyro.cli(Args)
-    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    # Generate run name based on environment, experiment, seed, and timestamp
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"  
+
+    # Create RTPT object to monitor progress with estimated time remaining
+    rtpt = RTPT(
+        name_initials=args.author, experiment_name="OCALM",
+        max_iterations=args.total_timesteps
+    )
+    rtpt.start()  # Start RTPT tracking
+
+    # Initialize tracking with Weights and Biases if enabled
     if args.track:
         import wandb
 
@@ -228,77 +222,107 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            dir=args.wandb_dir
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+        writer_dir = run.dir
+        postfix = dict(url=run.url)
+    else:
+        writer_dir = f"{args.wandb_dir}/{run_name}"
+        postfix = None
 
-    # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-
+    # Set logger level and determine whether to use GPU or CPU for computation
+    logger.set_level(args.logging_level)
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    logger.debug(f"Using device {device}.")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+    #envs = gym.vector.SyncVectorEnv(
+    #    [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+    #)
+    #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+
+    # Environment setup
+    envs = SubprocVecEnv(
+        [
+            make_env(
+                args.env_id, i, args.capture_video, writer_dir,
+                args.feature_func, args.buffer_window_size, args.frameskip
+            ) for i in range(0, args.num_envs)
+        ]
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
 
     q_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
     target_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
+    # Seeding the environment and PyTorch for reproducibility
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    torch.use_deterministic_algorithms(args.torch_deterministic)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_random_seed(args.seed, args.cuda)
+    envs.seed(args.seed)
+    envs.action_space.seed(args.seed)
+    q_network = QNetwork(envs).to(device)
+    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    target_network = QNetwork(envs).to(device)
+    target_network.load_state_dict(q_network.state_dict())
+
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
         device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
     start_time = time.time()
 
+    elength = 0
+    eorgr = 0
+    enewr = 0
+    count = 0
+    done_in_episode = False
+
     # TRY NOT TO MODIFY: start the game
     #import ipdb;ipdb.set_trace()
-    obs, _ = envs.reset(seed=args.seed)
+    obs = envs.reset()
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
         if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = np.array([envs.action_space.sample() for _ in range(envs.num_envs)])
         else:
             actions, pmf = q_network.get_action(torch.Tensor(obs).to(device))
             actions = actions.cpu().numpy()
 
         
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+        next_obs, reward, next_done, infos = envs.step(actions)
+        rewards[step] = torch.tensor(reward).to(device).view(-1)
+        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
         
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if info and "episode" in info:
-                    if args.backend == 1:
-                        writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
+        # Track episode-level statistics if a game is done
+        if 1 in next_done:
+            for info in infos:
+                if "episode" in info:
+                    count += 1
+                    done_in_episode = True
+                    if args.new_rf:
+                        enewr += info["episode"]["r"]
+                        eorgr += info["org_return"]
                     else:
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    
-                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        eorgr += info["episode"]["r"].item()
+                    elength += info["episode"]["l"]
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
-        real_next_obs = next_obs.copy()
-        for idx, trunc in enumerate(truncations):
-            if trunc:
-                real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+        rb.add(obs, next_obs, actions, rewards, terminations, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -345,58 +369,59 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             if global_step % args.target_network_frequency == 0:
                 target_network.load_state_dict(q_network.state_dict())
 
-    if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        model_data = {
-            "model_weights": q_network.state_dict(),
-            "args": vars(args),
-        }
-        torch.save(model_data, model_path)
-        print(f"model saved to {model_path}")
+        # Log episode statistics for Tensorboard
+        if done_in_episode:
+            if args.new_rf:
+                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
+            writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
+            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
+            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            elength = 0
+            eorgr = 0
+            enewr = 0
+            count = 0
+            done_in_episode = False
 
-        artifact = wandb.Artifact('model', type='model')
-        artifact.add_file(model_path)
-        run.log_artifact(artifact)
-        run.finish()
+        # Update RTPT for progress tracking
+        rtpt.step()
 
-        # data_list = []
-        # for i in range(args.buffer_size):
-        #     data_dict = {
-        #         "obs": rb.observations[i].flatten().tolist(),
-        #         "actions": rb.actions[i].flatten().tolist(),
-        #         "rewards": rb.rewards[i].flatten().tolist(),
-        #         "dones": rb.dones[i].flatten().tolist(),
-        #     }
-        #     data_list.append(data_dict)
-        
-        
-        # df = pd.DataFrame(data_list, columns=["obs", "actions", "rewards", "next_obs", "dones"])
-        # df.to_csv(f'runs/{run_name}/replay_buffer_data.csv')
 
-        # import ipdb
-        # ipdb.set_trace()
+    # Save the trained model to disk
+    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
+    model_data = {
+        "model_weights": agent.state_dict(),
+        "args": vars(args),
+    }
+    torch.save(model_data, model_path)
+    logger.info(f"model saved to {model_path} in epoch {epoch}")
 
-        from cleanrl_utils.evals.c51_eval import evaluate
-
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=QNetwork,
-            device=device,
-            epsilon=0.05,
+    # Log final model and performance with Weights and Biases if enabled
+    if args.track:
+        # Evaluate agent's performance
+        args.new_rf = ""
+        rewards = evaluate(
+            agent, make_env, 10,
+            env_id=args.env_id,
+            capture_video=args.capture_video,
+            run_dir=writer_dir,
+            feature_func=args.feature_func,
+            window_size=args.buffer_window_size
         )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
+        wandb.log({"FinalReward": np.mean(rewards)})
 
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "C51", f"runs/{run_name}", f"videos/{run_name}-eval")
+        # Log model to Weights and Biases
+        name = f"{args.exp_name}_s{args.seed}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
+        # Log video of agent's performance
+        if args.capture_video:
+            import glob
+            list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
+            latest_video = max(list_of_videos, key=os.path.getctime)
+            wandb.log({"video": wandb.Video(latest_video)})
+
+        wandb.finish()
 
     envs.close()
     writer.close()

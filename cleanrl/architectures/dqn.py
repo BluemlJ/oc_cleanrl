@@ -1,25 +1,62 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from torch.distributions.categorical import Categorical
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
-        # get the feature extractor and fully connected layers
-        self.__features = nn.Sequential(
-            nn.Conv2d(4, 32, kernel_size=8, stride=4),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(inplace=True),
-        )
-        self.__head = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 512), nn.ReLU(inplace=True), nn.Linear(512, env.single_action_space.n),
+        self.network = nn.Sequential(
+            nn.Conv2d(4, 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, env.action_space.n),
         )
 
     def forward(self, x):
-        y = self.__features(x / 255.0)
-        return self.__head(y.view(y.size(0), -1))
+        return self.network(x / 255.0)
 
 
-def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
-    slope = (end_e - start_e) / duration
-    return max(slope * t + start_e, end_e)
+class QNetwork_C51(nn.Module):
+    def __init__(self, env, n_atoms=101, v_min=-100, v_max=100):
+        super().__init__()
+        self.env = env
+        self.n_atoms = n_atoms
+        self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
+        self.n = env.action_space.n
+        self.network = nn.Sequential(
+            nn.Conv2d(4, 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, self.n * n_atoms),
+        )
+
+    def get_action(self, x, action=None):
+        logits = self.network(x / 255.0)
+        # probability mass function for each action
+        pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
+        q_values = (pmfs * self.atoms).sum(2)
+        if action is None:
+            action = torch.argmax(q_values, 1)
+        return action, pmfs[torch.arange(len(x)), action]
+
+
