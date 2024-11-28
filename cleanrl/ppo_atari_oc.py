@@ -19,7 +19,6 @@ from stable_baselines3.common.atari_wrappers import (
     FireResetEnv,
     NoopResetEnv,
 )
-from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from rtpt import RTPT

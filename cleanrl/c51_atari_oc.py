@@ -195,7 +195,7 @@ from architectures.dqn import QNetwork_C51 as QNetwork
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
-    
+
 if __name__ == "__main__":
     
     # Parse command-line arguments using Tyro
@@ -229,6 +229,13 @@ if __name__ == "__main__":
     else:
         writer_dir = f"{args.wandb_dir}/{run_name}"
         postfix = None
+
+    # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
+    writer = SummaryWriter(writer_dir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
 
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
@@ -304,9 +311,7 @@ if __name__ == "__main__":
         
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, next_done, infos = envs.step(actions)
-        rewards[step] = torch.tensor(reward).to(device).view(-1)
-        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
-
+        
         
         # Track episode-level statistics if a game is done
         if 1 in next_done:
@@ -322,7 +327,7 @@ if __name__ == "__main__":
                     elength += info["episode"]["l"]
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
-        rb.add(obs, next_obs, actions, rewards, terminations, infos)
+        rb.add(obs, next_obs, actions, reward, next_done, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -375,7 +380,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            #pbar.set_description(f"Reward: {eorgr / count:.1f}")
             elength = 0
             eorgr = 0
             enewr = 0

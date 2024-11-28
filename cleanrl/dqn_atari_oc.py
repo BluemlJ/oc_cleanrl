@@ -19,6 +19,7 @@ from stable_baselines3.common.atari_wrappers import (
     FireResetEnv,
     NoopResetEnv,
 )
+from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from rtpt import RTPT
@@ -187,6 +188,8 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
 
     return thunk
 
+from architectures.dqn import QNetwork
+    
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
@@ -225,6 +228,14 @@ if __name__ == "__main__":
         writer_dir = f"{args.wandb_dir}/{run_name}"
         postfix = None
 
+     # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
+    writer = SummaryWriter(writer_dir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
+
+
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -252,20 +263,13 @@ if __name__ == "__main__":
     set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
+    
     q_network = QNetwork(envs).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = QNetwork(envs).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
-    from architectures.dqn import QNetwork
-    q_network = QNetwork(envs).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = QNetwork(envs).to(device)
-    target_network.load_state_dict(q_network.state_dict())
-
-    # Initialize optimizer for training
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
+    
     rb = ReplayBuffer(
         args.buffer_size,
         envs.observation_space,
@@ -277,18 +281,10 @@ if __name__ == "__main__":
     start_time = time.time()
 
 
-    # Allocate storage for observations, actions, rewards, etc.
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-
     # Start training loop
     global_step = 0
     start_time = time.time()
-    next_obs = envs.reset(seed=args.seed)
+    next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -300,11 +296,11 @@ if __name__ == "__main__":
     #        lrnow = frac * args.learning_rate
     #        optimizer.param_groups[0]["lr"] = lrnow
 
-        elength = 0
-        eorgr = 0
-        enewr = 0
-        count = 0
-        done_in_episode = False
+    elength = 0
+    eorgr = 0
+    enewr = 0
+    count = 0
+    done_in_episode = False
 
     obs = envs.reset()
     for global_step in range(args.total_timesteps):
@@ -319,8 +315,6 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, next_done, infos = envs.step(actions)
-        rewards[step] = torch.tensor(reward).to(device).view(-1)
-        next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
         
         # Track episode-level statistics if a game is done
         if 1 in next_done:
@@ -375,7 +369,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-            pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            #pbar.set_description(f"Reward: {eorgr / count:.1f}")
             elength = 0
             eorgr = 0
             enewr = 0
