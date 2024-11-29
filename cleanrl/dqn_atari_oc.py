@@ -97,7 +97,7 @@ class Args:
     architecture: str = "DQN"
     """Specifies the used architecture"""
 
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 20_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""

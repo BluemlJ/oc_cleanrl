@@ -96,7 +96,7 @@ class Args:
     architecture : str = "PPO"
     """ Specifies the used architecture"""
 
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 20_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -297,7 +297,7 @@ if __name__ == "__main__":
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
     elif args.architecture == "PPO_OBJ":
-        from architectures.ppo import PPO_Obj as Agent
+        from architectures.ppo import PPO_Obj_small as Agent
         agent = Agent(envs, device).to(device)
     else:
         raise NotImplementedError
@@ -491,7 +491,8 @@ if __name__ == "__main__":
                            capture_video=args.capture_video,
                            run_dir=writer_dir,
                            feature_func=args.feature_func,
-                           window_size=args.buffer_window_size)
+                           window_size=args.buffer_window_size,
+                           device=device)
 
         wandb.log({"FinalReward": np.mean(rewards)})
 
