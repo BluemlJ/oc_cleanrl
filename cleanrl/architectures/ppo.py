@@ -44,17 +44,17 @@ class PPODefault(nn.Module):
             return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
 class PPO_Obj_small(nn.Module):
-    def __init__(self, envs, device):
+    def __init__(self, envs, input_size, window_size, device):
         super().__init__()
         self.device = device
 
         self.network = nn.Sequential(
-            layer_init(nn.Linear(4,128)),
+            layer_init(nn.Linear(input_size,128)),
             nn.ReLU(),
             layer_init(nn.Linear(128,64)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64*4*3, 32)),
+            layer_init(nn.Linear(64*window_size, 32)),
             nn.ReLU(),
             
         )

@@ -298,7 +298,7 @@ if __name__ == "__main__":
         agent = Agent(envs, device).to(device)
     elif args.architecture == "PPO_OBJ":
         from architectures.ppo import PPO_Obj_small as Agent
-        agent = Agent(envs, device).to(device)
+        agent = Agent(envs, envs.observation_space.shape[1], args.buffer_window_size, device).to(device)
     else:
         raise NotImplementedError
 
