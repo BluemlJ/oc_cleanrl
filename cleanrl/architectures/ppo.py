@@ -48,13 +48,15 @@ class PPO_Obj_small(nn.Module):
         super().__init__()
         self.device = device
 
+        dims = envs.observation_space.shape
+
         self.network = nn.Sequential(
             layer_init(nn.Linear(4,128)),
             nn.ReLU(),
             layer_init(nn.Linear(128,64)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64*4*3, 32)),
+            layer_init(nn.Linear(64*dims[0]*dims[1], 32)),
             nn.ReLU(),
             
         )
@@ -81,6 +83,8 @@ class PPO_Obj(nn.Module):
         super().__init__()
         self.device = device
 
+        dims = envs.observation_space.shape
+
         self.network = nn.Sequential(
             layer_init(nn.Linear(4,32)),
             nn.ReLU(),
@@ -89,7 +93,7 @@ class PPO_Obj(nn.Module):
             layer_init(nn.Linear(64,64)),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64*4*3, 512)),
+            layer_init(nn.Linear(64*dims[0]*dims[1], 512)),
             nn.ReLU(),
             
         )

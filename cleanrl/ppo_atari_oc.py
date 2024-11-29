@@ -95,7 +95,7 @@ class Args:
 
     # Algorithm specific arguments
     architecture : str = "PPO"
-    """ Specifies the used archtiecture"""
+    """ Specifies the used architecture"""
 
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
@@ -140,6 +140,10 @@ class Args:
     patch_size: int = 12
     """ViT patch size"""
 
+    # HackAtari testing
+    test_modifs: str = ""
+    """Modifications for Hackatari"""
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -154,22 +158,28 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh",
              window_size=4):
     def thunk():
         logger.set_level(args.logging_level)
+
+        kwargs = dict(
+            mode="ram",
+            obs_mode=args.obs_mode,
+            hud=False,
+            render_mode="rgb_array",
+            render_oc_overlay=False,
+            logger=logger,
+            feature_attr=feature_func,
+            buffer_window_size=window_size
+        )
+
         if args.backend == "HackAtari":
             logger.info("Using Hackatari backend")
             from hackatari.core import HackAtari
             env = HackAtari(env_id, modifs=args.modifs.split(" "),
-                            rewardfunc_path=args.new_rf, mode="ram",obs_mode=args.obs_mode,
-                            hud=False, render_mode="rgb_array",
-                            render_oc_overlay=False, frameskip=args.frameskip)
+                            rewardfunc_path=args.new_rf,
+                            frameskip=args.frameskip, **kwargs)
         elif args.backend == "OCAtari":
             logger.info("Using OCAtari backend")
             from ocatari.core import OCAtari
-            env = OCAtari(
-                env_id, hud=False, render_mode="rgb_array",
-                    render_oc_overlay=False, obs_mode=args.obs_mode,
-                    logger=logger, feature_attr=feature_func,
-                    # buffer_window_size=window_size
-            )
+            env = OCAtari(env_id, **kwargs)
         else:
             raise ValueError("Unknown Backend")
 
@@ -470,6 +480,18 @@ if __name__ == "__main__":
                            window_size=args.buffer_window_size)
 
         wandb.log({"FinalReward": np.mean(rewards)})
+
+        if args.test_modifs != "":
+            args.modifs = args.test_modifs
+            args.backend = "HackAtari"
+            rewards = evaluate(agent, make_env, 10,
+                               env_id=args.env_id,
+                               capture_video=args.capture_video,
+                               run_dir=writer_dir,
+                               feature_func=args.feature_func,
+                               window_size=args.buffer_window_size)
+
+            wandb.log({"HackAtariReward": np.mean(rewards)})
 
         # model
         name = f"{args.exp_name}_s{args.seed}"
