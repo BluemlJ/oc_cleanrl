@@ -29,6 +29,11 @@ class QNetwork(nn.Module):
     def forward(self, x):
         return self.network(x / 255.0)
 
+    def get_action_and_value(self, x):
+        q_values = self.network(x / 255.0)
+        action = torch.argmax(q_values, 1)
+        return action, q_values[action], None, None
+
 
 class QNetwork_C51(nn.Module):
     def __init__(self, env, n_atoms=101, v_min=-100, v_max=100):
@@ -59,4 +64,10 @@ class QNetwork_C51(nn.Module):
             action = torch.argmax(q_values, 1)
         return action, pmfs[torch.arange(len(x)), action]
 
-
+    def get_action_and_value(self, x):
+        logits = self.network(x / 255.0)
+        # probability mass function for each action
+        pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
+        q_values = (pmfs * self.atoms).sum(2)
+        action = torch.argmax(q_values, 1)
+        return action, q_values[:, action], None, None

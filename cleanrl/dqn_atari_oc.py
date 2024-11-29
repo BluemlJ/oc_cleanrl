@@ -103,7 +103,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 1000000
+    buffer_size: int = 1_000_000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -119,7 +119,7 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.10
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 80000
+    learning_starts: int = 80_000
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
@@ -268,7 +268,6 @@ if __name__ == "__main__":
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = QNetwork(envs).to(device)
     target_network.load_state_dict(q_network.state_dict())
-
     
     rb = ReplayBuffer(
         args.buffer_size,
@@ -278,8 +277,6 @@ if __name__ == "__main__":
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
-    start_time = time.time()
-
 
     # Start training loop
     global_step = 0
@@ -303,7 +300,8 @@ if __name__ == "__main__":
     done_in_episode = False
 
     obs = envs.reset()
-    for global_step in range(args.total_timesteps):
+    pbar = tqdm(range(1, args.total_timesteps + 1), postfix=postfix)
+    for global_step in pbar:
 
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
@@ -382,23 +380,24 @@ if __name__ == "__main__":
     # Save the trained model to disk
     model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
     model_data = {
-        "model_weights": agent.state_dict(),
+        "model_weights": q_network.state_dict(),
         "args": vars(args),
     }
     torch.save(model_data, model_path)
-    logger.info(f"model saved to {model_path} in epoch {epoch}")
+    logger.info(f"model saved to {model_path} in epoch {global_step}")
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
         # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(
-            agent, make_env, 10,
+            q_network, make_env, 10,
             env_id=args.env_id,
             capture_video=args.capture_video,
             run_dir=writer_dir,
             feature_func=args.feature_func,
-            window_size=args.buffer_window_size
+            window_size=args.buffer_window_size,
+            device=device
         )
 
         wandb.log({"FinalReward": np.mean(rewards)})

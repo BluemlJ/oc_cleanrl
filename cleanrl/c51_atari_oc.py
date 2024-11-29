@@ -101,8 +101,6 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    learning_rate: float = 2.5e-4
-    """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
     n_atoms: int = 51
@@ -299,7 +297,8 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     #import ipdb;ipdb.set_trace()
     obs = envs.reset()
-    for global_step in range(args.total_timesteps):
+    pbar = tqdm(range(1, args.total_timesteps + 1), postfix=postfix)
+    for global_step in pbar:
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
         if random.random() < epsilon:
@@ -394,23 +393,24 @@ if __name__ == "__main__":
     # Save the trained model to disk
     model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
     model_data = {
-        "model_weights": agent.state_dict(),
+        "model_weights": q_network.state_dict(),
         "args": vars(args),
     }
     torch.save(model_data, model_path)
-    logger.info(f"model saved to {model_path} in epoch {epoch}")
+    logger.info(f"model saved to {model_path} in epoch {global_step}")
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
         # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(
-            agent, make_env, 10,
+            q_network, make_env, 10,
             env_id=args.env_id,
             capture_video=args.capture_video,
             run_dir=writer_dir,
             feature_func=args.feature_func,
-            window_size=args.buffer_window_size
+            window_size=args.buffer_window_size,
+            device=device
         )
 
         wandb.log({"FinalReward": np.mean(rewards)})
