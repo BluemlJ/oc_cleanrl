@@ -42,14 +42,14 @@ class OCTransformer(nn.Module):
         super().__init__()
         self.device = device
 
-        dims = envs.observation_space.feature_space.shape
+        dims = envs.observation_space.shape
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
                                                 dropout=0.1, batch_first=True)
 
         self.network = nn.Sequential(
             layer_init(nn.Linear(dims[1], emb_dim, device=device)),
-            # nn.ReLU(),
+            nn.ReLU(),
             # layer_init(nn.Linear(emb_dim, 16, device=device)),
             # nn.ReLU(),
             # layer_init(nn.Linear(16, emb_dim, device=device)),
