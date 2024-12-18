@@ -62,7 +62,7 @@ class Args:
     """the id of the environment"""
     obs_mode: str = "dqn"
     """observation mode for OCAtari"""
-    feature_func: str = ""
+    feature_func: str = "xy"
     """the object features to use as observations"""
     buffer_window_size: int = 4
     """length of history in the observations"""
@@ -291,7 +291,7 @@ if __name__ == "__main__":
         from architectures.ppo import PPODefault as Agent
         agent = Agent(envs, device).to(device)
     else:
-        from architectures.ppo import PPO_Obj as Agent
+        from architectures.ppo import PPObj as Agent
         agent = Agent(envs, device).to(device)
 
     
