@@ -1,19 +1,25 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
-import warnings
 import os
 import sys
+import tyro
 import time
 import random
-from dataclasses import dataclass
-from pathlib import Path
+import warnings
 
-import tyro
 import numpy as np
+
+from tqdm import tqdm
+from rtpt import RTPT
+from pathlib import Path
+from dataclasses import dataclass
+
+import gymnasium as gym
+from gymnasium import logger
+
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+
 from stable_baselines3.common.atari_wrappers import (
     EpisodicLifeEnv,
     FireResetEnv,
@@ -22,9 +28,9 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
-from rtpt import RTPT
-import gymnasium as gym
-from gymnasium import logger
+
+from architectures.dqn import QNetwork_C51 as QNetwork
+
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -43,6 +49,7 @@ if oc_atari_dir is not None:
 eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
 from generic_eval import evaluate  # noqa
+
 
 # Command line argument configuration using dataclass
 @dataclass
@@ -93,7 +100,7 @@ class Args:
     author : str = "JB"
     """Initials of the author"""
 
-        # Algorithm-specific arguments
+    # Algorithm-specific arguments
     architecture: str = "C51"
     """Specifies the used architecture"""
 
@@ -128,12 +135,17 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
+    # HackAtari testing
+    test_modifs: str = ""
+    """Modifications for Hackatari"""
+
+
 # Global variable to hold parsed arguments
 global args
 
 
 # Function to create a gym environment with the specified settings
-def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_size=4, frameskip=4):
+def make_env(env_id, idx, capture_video, run_dir):
     """
     Creates a gym environment with the specified settings.
     """
@@ -167,13 +179,14 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
             env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, 4)
+            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
         else:
             raise ValueError("Unknown Backend")
 
         # Capture video if required
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos", disable_logger=True)
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos",
+                                           disable_logger=True)
 
         # Apply standard Atari environment wrappers
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -187,26 +200,15 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
     return thunk
 
 
-# ALGO LOGIC: initialize agent here:
-from architectures.dqn import QNetwork_C51 as QNetwork
-
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
 if __name__ == "__main__":
-    
     # Parse command-line arguments using Tyro
     args = tyro.cli(Args)
     # Generate run name based on environment, experiment, seed, and timestamp
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"  
-
-    # Create RTPT object to monitor progress with estimated time remaining
-    rtpt = RTPT(
-        name_initials=args.author, experiment_name="OCALM",
-        max_iterations=args.total_timesteps
-    )
-    rtpt.start()  # Start RTPT tracking
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
@@ -235,32 +237,27 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # Create RTPT object to monitor progress with estimated time remaining
+    rtpt = RTPT(
+        name_initials=args.author, experiment_name="OCALM",
+        max_iterations=args.total_timesteps
+    )
+    rtpt.start()  # Start RTPT tracking
+
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
-    # env setup
-    #envs = gym.vector.SyncVectorEnv(
-    #    [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
-    #)
-    #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
     # Environment setup
     envs = SubprocVecEnv(
         [
             make_env(
-                args.env_id, i, args.capture_video, writer_dir,
-                args.feature_func, args.buffer_window_size, args.frameskip
+                args.env_id, i, args.capture_video, writer_dir
             ) for i in range(0, args.num_envs)
         ]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
-
-    q_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
-    target_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
-    target_network.load_state_dict(q_network.state_dict())
 
     # Seeding the environment and PyTorch for reproducibility
     os.environ["PYTHONHASHSEED"] = str(args.seed)
@@ -273,9 +270,10 @@ if __name__ == "__main__":
     set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
-    q_network = QNetwork(envs).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = QNetwork(envs).to(device)
+
+    q_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
+    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
+    target_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
@@ -286,6 +284,9 @@ if __name__ == "__main__":
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
+
+    # Start training loop
+    global_step = 0
     start_time = time.time()
 
     elength = 0
@@ -295,7 +296,6 @@ if __name__ == "__main__":
     done_in_episode = False
 
     # TRY NOT TO MODIFY: start the game
-    #import ipdb;ipdb.set_trace()
     obs = envs.reset()
     pbar = tqdm(range(1, args.total_timesteps + 1), postfix=postfix)
     for global_step in pbar:
@@ -414,6 +414,19 @@ if __name__ == "__main__":
         )
 
         wandb.log({"FinalReward": np.mean(rewards)})
+
+        if args.test_modifs != "":
+            args.modifs = args.test_modifs
+            args.backend = "HackAtari"
+            rewards = evaluate(
+                q_network, make_env, 10,
+                env_id=args.env_id,
+                capture_video=args.capture_video,
+                run_dir=writer_dir,
+                device=device
+            )
+
+            wandb.log({"HackAtariReward": np.mean(rewards)})
 
         # Log model to Weights and Biases
         name = f"{args.exp_name}_s{args.seed}"

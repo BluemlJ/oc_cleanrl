@@ -21,13 +21,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from stable_baselines3.common.atari_wrappers import (
-    EpisodicLifeEnv,
-    FireResetEnv,
-    NoopResetEnv,
-)
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
+
+from ocrltransformer import environments  # noqa
 
 
 # Suppress warnings to avoid cluttering output
@@ -62,23 +59,9 @@ class Args:
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
 
-    # Environment parameters
-    env_id: str = "ALE/Pong-v5"
+    # Environment
+    env_id: str = "OCCartPole-v0"
     """the id of the environment"""
-    obs_mode: str = "dqn"
-    """observation mode for OCAtari"""
-    feature_func: str = ""
-    """the object features to use as observations"""
-    buffer_window_size: int = 4
-    """length of history in the observations"""
-    backend: str = "OCAtari"
-    """Which Backend should we use"""
-    modifs: str = ""
-    """Modifications for Hackatari"""
-    new_rf: str = ""
-    """Path to a new reward functions for OCALM and HACKATARI"""
-    frameskip: int = 4
-    """the frame skipping option of the environment"""
 
     # Tracking (Logging and monitoring configurations)
     track: bool = False
@@ -95,18 +78,18 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author : str = "JB"
+    author : str = "CD"
     """Initials of the author"""
 
     # Algorithm-specific arguments
     architecture : str = "PPO"
     """ Specifies the used architecture"""
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 100_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 10
+    num_envs: int = 2
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -142,8 +125,6 @@ class Args:
     """number of multi-attention heads"""
     num_blocks: int = 1
     """number of transformer blocks"""
-    patch_size: int = 12
-    """ViT patch size"""
 
     # PPObj network parameters
     encoder_dims: list[int] = ()
@@ -151,9 +132,6 @@ class Args:
     decoder_dims: list[int] = (128,)
     """layer dimensions after nn.Flatten()"""
 
-    # HackAtari testing
-    test_modifs: str = ""
-    """Modifications for Hackatari"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -174,36 +152,8 @@ def make_env(env_id, idx, capture_video, run_dir):
     """
     def thunk():
         logger.set_level(args.logging_level)
-        # Setup environment based on backend type (HackAtari, OCAtari, Gym)
-        if args.backend == "HackAtari":
-            from hackatari.core import HackAtari
-            modifs = [i for i in args.modifs.split(" ") if i]
-            env = HackAtari(
-                env_id,
-                modifs=modifs,
-                rewardfunc_path=args.new_rf,
-                obs_mode=args.obs_mode,
-                hud=False,
-                render_mode="rgb_array",
-                frameskip=args.frameskip
-            )
-        elif args.backend == "OCAtari":
-            from ocatari.core import OCAtari
-            env = OCAtari(
-                env_id,
-                hud=False,
-                render_mode="rgb_array",
-                obs_mode=args.obs_mode,
-                frameskip=args.frameskip
-            )
-        elif args.backend == "Gym":
-            # Use Gym backend with image preprocessing wrappers
-            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
-            env = gym.wrappers.ResizeObservation(env, (84, 84))
-            env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
-        else:
-            raise ValueError("Unknown Backend")
+
+        env = gym.make(env_id, render_mode="rgb_array")
 
         # Capture video if required
         if capture_video and idx == 0:
@@ -211,17 +161,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                                            f"{run_dir}/media/videos",
                                            disable_logger=True)
 
-        # Apply standard Atari environment wrappers
+        # Apply environment wrappers
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = NoopResetEnv(env, noop_max=30)
-        env = EpisodicLifeEnv(env)
-        if "FIRE" in env.unwrapped.get_action_meanings():
-            env = FireResetEnv(env)
-
-        # If architecture is OCT, apply OCWrapper to environment
-        if args.architecture == "OCT":
-            from ocrltransformer.wrappers import OCWrapper
-            env = OCWrapper(env)
 
         return env
 
@@ -277,14 +218,10 @@ if __name__ == "__main__":
 
     # Environment setup
     envs = SubprocVecEnv(
-        [
-            make_env(
-                args.env_id, i, args.capture_video, writer_dir
-            ) for i in range(0, args.num_envs)
-        ]
+        [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0, args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
-    
+
     # Seeding the environment and PyTorch for reproducibility
     os.environ['PYTHONHASHSEED'] = str(args.seed)
     torch.use_deterministic_algorithms(args.torch_deterministic)
@@ -296,29 +233,11 @@ if __name__ == "__main__":
     set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
-    
+
     # Define the agent's architecture based on command line arguments
     if args.architecture == "OCT":
         from architectures.transformer import OCTransformer as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device).to(device)
-    elif args.architecture == "VIT":
-        from architectures.transformer import VIT as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                      args.patch_size, args.buffer_window_size, device).to(device)
-    elif args.architecture == "VIT2":
-        from architectures.transformer import SimpleViT2 as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                      args.patch_size, args.buffer_window_size, device).to(device)
-    elif args.architecture == "MobileVit":
-        from architectures.transformer import MobileVIT as Agent
-        agent = Agent(envs, args.emb_dim, device).to(device)
-    elif args.architecture == "MobileVit2":
-        from architectures.transformer import MobileViT2 as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
-                      args.patch_size, args.buffer_window_size, device).to(device)
-    elif args.architecture == "PPO":
-        from architectures.ppo import PPODefault as Agent
-        agent = Agent(envs, device).to(device)
     elif args.architecture == "PPO_OBJ":
         from architectures.ppo import PPObj as Agent
         agent = Agent(envs, device, args.encoder_dims, args.decoder_dims).to(device)
@@ -381,11 +300,7 @@ if __name__ == "__main__":
                     if "episode" in info:
                         count += 1
                         done_in_episode = True
-                        if args.new_rf:
-                            enewr += info["episode"]["r"]
-                            eorgr += info["org_return"]
-                        else:
-                            eorgr += info["episode"]["r"]
+                        eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
 
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
@@ -476,8 +391,6 @@ if __name__ == "__main__":
 
         # Log episode statistics for Tensorboard
         if done_in_episode:
-            if args.new_rf:
-                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
@@ -508,7 +421,6 @@ if __name__ == "__main__":
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
         # Evaluate agent's performance
-        args.new_rf = ""
         rewards = evaluate(agent, make_env, 10,
                            env_id=args.env_id,
                            capture_video=args.capture_video,
@@ -516,17 +428,6 @@ if __name__ == "__main__":
                            device=device)
 
         wandb.log({"FinalReward": np.mean(rewards)})
-
-        if args.test_modifs != "":
-            args.modifs = args.test_modifs
-            args.backend = "HackAtari"
-            rewards = evaluate(agent, make_env, 10,
-                               env_id=args.env_id,
-                               capture_video=args.capture_video,
-                               run_dir=writer_dir,
-                               device=device)
-
-            wandb.log({"HackAtariReward": np.mean(rewards)})
 
         # Log model to Weights and Biases
         name = f"{args.exp_name}_s{args.seed}"

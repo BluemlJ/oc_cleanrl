@@ -1,16 +1,12 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import numpy as np
+
+import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+from .common import Predictor, layer_init
 
-class PPODefault(nn.Module):
-    
+
+class PPODefault(Predictor):
     def __init__(self, envs, device):
         super().__init__()
         self.device = device
@@ -39,44 +35,44 @@ class PPODefault(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
-class PPO_Obj_small(nn.Module):
-    def __init__(self, envs, input_size, window_size, device):
+class PPObj(Predictor):
+    def __init__(self, envs, device, encoder_dims=(128, 64), decoder_dims=(32,)):
         super().__init__()
         self.device = device
 
-        self.network = nn.Sequential(
-            layer_init(nn.Linear(input_size,128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128,64)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64*window_size, 32)),
-            nn.ReLU(),
-            
-        )
-        self.actor = layer_init(nn.Linear(32, envs.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(32, 1), std=1)
+        dims = envs.observation_space.shape
+        layers = nn.ModuleList()
+
+        in_dim = dims[-1]
+
+        for l in encoder_dims:
+            layers.append(layer_init(nn.Linear(in_dim, l)))
+            in_dim = l
+        layers.append(nn.Flatten())
+        in_dim *= np.prod(dims[:-1], dtype=int)
+        l = in_dim
+        for l in decoder_dims:
+            layers.append(layer_init(nn.Linear(in_dim, l)))
+            in_dim = l
+
+        self.network = nn.Sequential(*layers)
+        self.actor = layer_init(nn.Linear(l, envs.action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(l, 1), std=1)
 
     def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
+        return self.critic(self.network(x))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
+        hidden = self.network(x)
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
-class PPO_Obj(nn.Module):
+class PPO_Obj(Predictor):
     def __init__(self, envs, device):
         super().__init__()
         self.device = device
@@ -105,7 +101,3 @@ class PPO_Obj(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-
-    def predict(self, x, states=None, **_):
-        with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states

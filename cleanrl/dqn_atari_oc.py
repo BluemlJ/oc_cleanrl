@@ -1,19 +1,26 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
-import warnings
 import os
 import sys
+import tyro
 import time
 import random
-from dataclasses import dataclass
-from pathlib import Path
+import warnings
 
-import tyro
 import numpy as np
+
+from tqdm import tqdm
+from rtpt import RTPT
+from pathlib import Path
+from dataclasses import dataclass
+
+import gymnasium as gym
+from gymnasium import logger
+
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+
 from stable_baselines3.common.atari_wrappers import (
     EpisodicLifeEnv,
     FireResetEnv,
@@ -22,9 +29,8 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
-from rtpt import RTPT
-import gymnasium as gym
-from gymnasium import logger
+
+from architectures.dqn import QNetwork
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -124,13 +130,16 @@ class Args:
     train_frequency: int = 4
     """the frequency of training"""
 
+    # HackAtari testing
+    test_modifs: str = ""
+    """Modifications for Hackatari"""
+
+
 # Global variable to hold parsed arguments
 global args
 
-
-
 # Function to create a gym environment with the specified settings
-def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_size=4, frameskip=4):
+def make_env(env_id, idx, capture_video, run_dir):
     """
     Creates a gym environment with the specified settings.
     """
@@ -164,13 +173,14 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
             env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, 4)
+            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
         else:
             raise ValueError("Unknown Backend")
 
         # Capture video if required
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos", disable_logger=True)
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos",
+                                           disable_logger=True)
 
         # Apply standard Atari environment wrappers
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -188,25 +198,16 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func="xywh", window_si
 
     return thunk
 
-from architectures.dqn import QNetwork
     
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
 if __name__ == "__main__":
-    
     # Parse command-line arguments using Tyro
     args = tyro.cli(Args)
     # Generate run name based on environment, experiment, seed, and timestamp
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"  
-
-    # Create RTPT object to monitor progress with estimated time remaining
-    rtpt = RTPT(
-        name_initials=args.author, experiment_name="OCALM",
-        max_iterations=args.total_timesteps
-    )
-    rtpt.start()  # Start RTPT tracking
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
@@ -225,7 +226,7 @@ if __name__ == "__main__":
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"{args.wandb_dir}/{run_name}"
+        writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
 
      # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
@@ -235,6 +236,10 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # Create RTPT object to monitor progress with estimated time remaining
+    rtpt = RTPT(name_initials=args.author, experiment_name="OCALM",
+        max_iterations=args.total_timesteps)
+    rtpt.start()  # Start RTPT tracking
 
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
@@ -245,8 +250,7 @@ if __name__ == "__main__":
     envs = SubprocVecEnv(
         [
             make_env(
-                args.env_id, i, args.capture_video, writer_dir,
-                args.feature_func, args.buffer_window_size, args.frameskip
+                args.env_id, i, args.capture_video, writer_dir
             ) for i in range(0, args.num_envs)
         ]
     )
@@ -284,14 +288,6 @@ if __name__ == "__main__":
     next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
-
-    # Iterate through training iterations with progress bar
-    #pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
-    #for iteration in pbar:  # Anneal learning rate if specified
-    #    if args.anneal_lr:
-    #        frac = 1.0 - (iteration - 1.0) / args.num_iterations
-    #        lrnow = frac * args.learning_rate
-    #        optimizer.param_groups[0]["lr"] = lrnow
 
     elength = 0
     eorgr = 0
@@ -395,12 +391,23 @@ if __name__ == "__main__":
             env_id=args.env_id,
             capture_video=args.capture_video,
             run_dir=writer_dir,
-            feature_func=args.feature_func,
-            window_size=args.buffer_window_size,
             device=device
         )
 
         wandb.log({"FinalReward": np.mean(rewards)})
+
+        if args.test_modifs != "":
+            args.modifs = args.test_modifs
+            args.backend = "HackAtari"
+            rewards = evaluate(
+                q_network, make_env, 10,
+                env_id=args.env_id,
+                capture_video=args.capture_video,
+                run_dir=writer_dir,
+                device=device
+            )
+
+            wandb.log({"HackAtariReward": np.mean(rewards)})
 
         # Log model to Weights and Biases
         name = f"{args.exp_name}_s{args.seed}"

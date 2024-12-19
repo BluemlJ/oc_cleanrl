@@ -1,16 +1,11 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from torch.distributions.categorical import Categorical
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+from .common import Predictor, layer_init
+
 
 # ALGO LOGIC: initialize agent here:
-class QNetwork(nn.Module):
+class QNetwork(Predictor):
     def __init__(self, env):
         super().__init__()
         self.network = nn.Sequential(
@@ -35,7 +30,7 @@ class QNetwork(nn.Module):
         return action, q_values[action], None, None
 
 
-class QNetwork_C51(nn.Module):
+class QNetwork_C51(Predictor):
     def __init__(self, env, n_atoms=101, v_min=-100, v_max=100):
         super().__init__()
         self.env = env

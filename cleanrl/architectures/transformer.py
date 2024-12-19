@@ -8,11 +8,7 @@ from torch.distributions.categorical import Categorical
 from vit_pytorch import SimpleViT
 from vit_pytorch.mobile_vit import MobileViT
 
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+from .common import Predictor, layer_init
 
 
 class PositionalEncoding(nn.Module):
@@ -37,19 +33,19 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class OCTransformer(nn.Module):
+class OCTransformer(Predictor):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
         super().__init__()
         self.device = device
 
-        dims = envs.observation_space.feature_space.shape
+        dims = envs.observation_space.shape
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
                                                 dropout=0.1, batch_first=True)
 
         self.network = nn.Sequential(
             layer_init(nn.Linear(dims[1], emb_dim, device=device)),
-            # nn.ReLU(),
+            nn.ReLU(),
             # layer_init(nn.Linear(emb_dim, 16, device=device)),
             # nn.ReLU(),
             # layer_init(nn.Linear(16, emb_dim, device=device)),
@@ -73,7 +69,7 @@ class OCTransformer(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-class VIT(nn.Module):
+class VIT(Predictor):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
                  buffer_window_size, device):
         super().__init__()
@@ -107,18 +103,17 @@ class VIT(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-class MobileVIT(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
-                 buffer_window_size, device):
+class MobileVIT(Predictor):
+    def __init__(self, envs, emb_dim, device):
         super().__init__()
         self.device = device
     
         self.network = nn.Sequential(
                 MobileViT(
-                    image_size=(84,84),
+                    image_size=(84, 84),
                     num_classes=emb_dim,
                     dims = [96, 120, 144],
-                    channels = [4,4]
+                    channels = [4, 4]
                 ).to(device),
                 nn.Flatten(),
             )
@@ -137,7 +132,7 @@ class MobileVIT(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-class MobileViT2(nn.Module):
+class MobileViT2(Predictor):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
                  buffer_window_size, device):
         super().__init__()
@@ -161,14 +156,14 @@ class MobileViT2(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(logits)
 
 
-class SimpleViT2(nn.Module):
+class SimpleViT2(Predictor):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, patch_size,
                  buffer_window_size, device):
         super().__init__()
         self.device = device
 
         self.network = SimpleViT(
-        image_size = 84,
+        image_size=84,
         patch_size=patch_size,
         channels=buffer_window_size,
         num_classes=envs.action_space.n,
@@ -182,4 +177,4 @@ class SimpleViT2(nn.Module):
         return self.network(x)
 
     def get_action_and_value(self, x, action=None):
-        return self.get_value(x),0,0,0
+        return self.get_value(x), 0, 0, 0
