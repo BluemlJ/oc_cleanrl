@@ -48,12 +48,14 @@ class PPObj(Predictor):
 
         for l in encoder_dims:
             layers.append(layer_init(nn.Linear(in_dim, l)))
+            layers.append(nn.ReLU())
             in_dim = l
         layers.append(nn.Flatten())
         in_dim *= np.prod(dims[:-1], dtype=int)
         l = in_dim
         for l in decoder_dims:
             layers.append(layer_init(nn.Linear(in_dim, l)))
+            layers.append(nn.ReLU())
             in_dim = l
 
         self.network = nn.Sequential(*layers)
