@@ -342,7 +342,7 @@ if __name__ == "__main__":
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/td_loss", loss, global_step)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-                    print("SPS:", int(global_step / (time.time() - start_time)))
+                    # print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                     
                 # optimize the model
@@ -363,7 +363,7 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
             writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
-            #pbar.set_description(f"Reward: {eorgr / count:.1f}")
+            pbar.set_description(f"Reward: {eorgr / count:.1f}")
             elength = 0
             eorgr = 0
             enewr = 0
