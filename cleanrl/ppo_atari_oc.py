@@ -102,7 +102,7 @@ class Args:
     architecture : str = "PPO"
     """ Specifies the used architecture"""
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -162,6 +162,10 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    masked_wrapper: str = ""
+    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    add_pixels: bool = False
+    """should the grayscale game screen be added to the observations (set in runtime)"""
 
 
 # Global variable to hold parsed arguments
@@ -223,6 +227,22 @@ def make_env(env_id, idx, capture_video, run_dir):
             from ocrltransformer.wrappers import OCWrapper
             env = OCWrapper(env)
 
+        # If masked obs_mode are set, apply correct wrapper
+        elif args.masked_wrapper == "masked_dqn_bin":
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                     include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixels":
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                    include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_grayscale":
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl":
+            env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
+                                             include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl_grouped":
+            env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
+
         return env
 
     return thunk
@@ -237,6 +257,18 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        import ocatari_wrappers
+
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "obj"
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
