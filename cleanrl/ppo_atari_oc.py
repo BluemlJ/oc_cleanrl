@@ -189,7 +189,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "OCAtari":
             from ocatari.core import OCAtari
@@ -198,7 +199,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 hud=False,
                 render_mode="rgb_array",
                 obs_mode=args.obs_mode,
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "Gym":
             # Use Gym backend with image preprocessing wrappers
@@ -237,6 +239,9 @@ def make_env(env_id, idx, capture_video, run_dir):
         elif args.masked_wrapper == "masked_dqn_grayscale":
             env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
                                                          include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_planes":
+            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
         elif args.masked_wrapper == "masked_dl":
             env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
                                              include_pixels=args.add_pixels)
@@ -268,7 +273,7 @@ if __name__ == "__main__":
         else:
             args.masked_wrapper = args.obs_mode
             args.add_pixels = False
-        args.obs_mode = "obj"
+        args.obs_mode = "ori"
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
