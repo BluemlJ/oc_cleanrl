@@ -104,7 +104,7 @@ class Args:
     architecture: str = "C51"
     """Specifies the used architecture"""
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -116,11 +116,11 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-    buffer_size: int = 1000000
+    buffer_size: int = 1_000_000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    target_network_frequency: int = 10000
+    target_network_frequency: int = 10_000
     """the timesteps it takes to update the target network"""
     batch_size: int = 32
     """the batch size of sample from the reply memory"""
@@ -130,7 +130,7 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.10
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 80000
+    learning_starts: int = 80_000
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
@@ -139,17 +139,21 @@ class Args:
     test_modifs: str = ""
     """Modifications for Hackatari"""
 
+    # to be filled in runtime
+    masked_wrapper: str = ""
+    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    add_pixels: bool = False
+    """should the grayscale game screen be added to the observations (set in runtime)"""
+
 
 # Global variable to hold parsed arguments
 global args
-
 
 # Function to create a gym environment with the specified settings
 def make_env(env_id, idx, capture_video, run_dir):
     """
     Creates a gym environment with the specified settings.
     """
-
     def thunk():
         logger.set_level(args.logging_level)
         # Setup environment based on backend type (HackAtari, OCAtari, Gym)
@@ -163,7 +167,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "OCAtari":
             from ocatari.core import OCAtari
@@ -172,7 +177,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 hud=False,
                 render_mode="rgb_array",
                 obs_mode=args.obs_mode,
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "Gym":
             # Use Gym backend with image preprocessing wrappers
@@ -185,7 +191,8 @@ def make_env(env_id, idx, capture_video, run_dir):
 
         # Capture video if required
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos",
+            env = gym.wrappers.RecordVideo(env,
+                                           f"{run_dir}/media/videos",
                                            disable_logger=True)
 
         # Apply standard Atari environment wrappers
@@ -194,7 +201,31 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-            
+
+        # If architecture is OCT, apply OCWrapper to environment
+        if args.architecture == "OCT":
+            from ocrltransformer.wrappers import OCWrapper
+            env = OCWrapper(env)
+
+        # If masked obs_mode are set, apply correct wrapper
+        elif args.masked_wrapper == "masked_dqn_bin":
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                     include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixels":
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                    include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_grayscale":
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_planes":
+            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl":
+            env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
+                                             include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl_grouped":
+            env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
+
         return env
 
     return thunk
@@ -209,6 +240,18 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        import ocatari_wrappers
+
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "ori"
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
@@ -227,7 +270,7 @@ if __name__ == "__main__":
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"{args.wandb_dir}/{run_name}"
+        writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
 
     # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
@@ -283,6 +326,7 @@ if __name__ == "__main__":
         device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
+        n_envs=args.num_envs
     )
 
     # Start training loop
@@ -297,8 +341,9 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     obs = envs.reset()
-    pbar = tqdm(range(1, args.total_timesteps + 1), postfix=postfix)
-    for global_step in pbar:
+    pbar = tqdm(range(1, args.total_timesteps // args.num_envs + 1), postfix=postfix)
+    for iteration in pbar:
+        global_step = args.num_envs * iteration
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
         if random.random() < epsilon:
@@ -408,8 +453,6 @@ if __name__ == "__main__":
             env_id=args.env_id,
             capture_video=args.capture_video,
             run_dir=writer_dir,
-            feature_func=args.feature_func,
-            window_size=args.buffer_window_size,
             device=device
         )
 
