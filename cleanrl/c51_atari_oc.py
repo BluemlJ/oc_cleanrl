@@ -241,18 +241,6 @@ if __name__ == "__main__":
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
-    # prepare for masking wrappers
-    if "masked" in args.obs_mode:
-        import ocatari_wrappers
-
-        if args.obs_mode.endswith("+pixels"):
-            args.masked_wrapper = args.obs_mode[:-7]
-            args.add_pixels = True
-        else:
-            args.masked_wrapper = args.obs_mode
-            args.add_pixels = False
-        args.obs_mode = "ori"
-
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
         import wandb
@@ -279,6 +267,18 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        import ocatari_wrappers
+
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "ori"
 
     # Create RTPT object to monitor progress with estimated time remaining
     rtpt = RTPT(
