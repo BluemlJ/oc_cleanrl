@@ -423,6 +423,10 @@ if __name__ == "__main__":
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
+        # Log model to Weights and Biases
+        name = f"{args.exp_name}_s{args.seed}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
         # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(
@@ -447,10 +451,6 @@ if __name__ == "__main__":
             )
 
             wandb.log({"HackAtariReward": np.mean(rewards)})
-
-        # Log model to Weights and Biases
-        name = f"{args.exp_name}_s{args.seed}"
-        run.log_model(model_path, name)  # noqa: cannot be undefined
 
         # Log video of agent's performance
         if args.capture_video:
