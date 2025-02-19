@@ -125,7 +125,7 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.10
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 80_000
+    learning_starts: int = 8_000
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
@@ -213,6 +213,9 @@ def make_env(env_id, idx, capture_video, run_dir):
                                                          include_pixels=args.add_pixels)
         elif args.masked_wrapper == "masked_dqn_planes":
             env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixel_planes":
+            env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
                                                          include_pixels=args.add_pixels)
         elif args.masked_wrapper == "masked_dl":
             env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,

@@ -220,6 +220,9 @@ def make_env(env_id, idx, capture_video, run_dir):
         elif args.masked_wrapper == "masked_dqn_planes":
             env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
                                                          include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixel_planes":
+            env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
         elif args.masked_wrapper == "masked_dl":
             env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
                                              include_pixels=args.add_pixels)
