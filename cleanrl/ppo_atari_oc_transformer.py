@@ -35,7 +35,7 @@ if oc_atari_dir is not None:
     a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocrltransformer.wrappers import OCWrapper
+from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
 
@@ -58,11 +58,11 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "obj"
+    obs_mode: str = "ori"
     """observation mode for OCAtari"""
     feature_func: str = "xywh"
     """the object features to use as observations"""
-    buffer_window_size: int = 4
+    buffer_window_size: int = 0
     """length of history in the observations"""
     backend: int = 0
     """Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI"""
@@ -78,9 +78,9 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "OCRL_Transformer"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "vanillawhey"
     """the entity (team) of wandb's project"""
-    wandb_dir: str = None
+    wandb_dir: str = "../../wandb"
     """the wandb directory"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -131,6 +131,10 @@ class Args:
     num_blocks: int = 4
     """number of transformer blocks"""
 
+    # Wrapper
+    player_name: str = "Player"
+    """the name of the player category"""
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -178,7 +182,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = OCWrapper(env)
+        env = OCWrapper(env, args.player_name, include_type=True)
 
         return env
 
@@ -196,7 +200,7 @@ class PPOAgent(nn.Module):
         super().__init__()
 
         self.device = device
-        dims = envs.observation_space.feature_space.shape
+        dims = envs.observation_space.shape
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
@@ -249,7 +253,7 @@ if __name__ == "__main__":
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"{args.wandb_dir}/{run_name}"
+        writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
 
     writer = SummaryWriter(writer_dir)
@@ -260,7 +264,7 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials='CD', experiment_name='OCRLAtari',
+    rtpt = RTPT(name_initials='CD', experiment_name='OCTransformer',
                 max_iterations=args.num_iterations)
 
     # Start the RTPT tracking
@@ -290,7 +294,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.feature_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -368,7 +372,7 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.observation_space.feature_space.shape)
+        b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.action_space.shape)
         b_advantages = advantages.reshape(-1)
