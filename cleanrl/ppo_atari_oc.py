@@ -97,6 +97,8 @@ class Args:
     """Logging level for the Gymnasium logger"""
     author : str = "JB"
     """Initials of the author"""
+    checkpoint_interval: int = 40
+    """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
     architecture : str = "PPO"
@@ -397,6 +399,22 @@ if __name__ == "__main__":
         count = 0
         done_in_episode = False
 
+        if iteration % args.checkpoint_interval == 0:
+            # Save the trained model to disk
+            model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
+            model_data = {
+                "model_weights": agent.state_dict(),
+                "args": vars(args),
+                "Timesteps": iteration * args.batch_size
+            }
+            torch.save(model_data, model_path)
+            logger.info(f"model saved to {model_path} in epoch {epoch}")
+
+            # Log model with Weights and Biases if enabled
+            if args.track:
+                name = f"{args.exp_name}_s{args.seed}"
+                run.log_model(model_path, name)  # noqa: cannot be undefined
+
         # Perform rollout in each environment
         for step in range(0, args.num_steps):
             global_step += args.num_envs
@@ -537,7 +555,7 @@ if __name__ == "__main__":
         rtpt.step()
 
     # Save the trained model to disk
-    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
+    model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
     model_data = {
         "model_weights": agent.state_dict(),
         "args": vars(args),
