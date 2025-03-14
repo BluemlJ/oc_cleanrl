@@ -131,4 +131,4 @@ venv.bak/
 .mypy_cache/
 
 # pycharm
-.idea
+./*/.idea
