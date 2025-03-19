@@ -128,7 +128,7 @@ class Args:
     """input embedding size of the transformer"""
     num_heads: int = 8
     """number of multi-attention heads"""
-    num_blocks: int = 4
+    num_blocks: int = 3
     """number of transformer blocks"""
 
     # Wrapper
@@ -210,9 +210,13 @@ class PPOAgent(nn.Module):
             nn.Linear(dims[1], emb_dim, device=device),
             TransformerEncoder(encoder_layer, num_blocks),
             nn.Flatten(),
+            nn.Linear(dims[0] * emb_dim, emb_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(emb_dim, emb_dim, device=device),
+            nn.ReLU(),
         )
-        self.actor = layer_init(nn.Linear(dims[0] * emb_dim, envs.action_space.n, device=device), std=0.01)
-        self.critic = layer_init(nn.Linear(dims[0] * emb_dim, 1, device=device), std=1)
+        self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
+        self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
 
     def get_value(self, x):
         return self.critic(self.network(x))
