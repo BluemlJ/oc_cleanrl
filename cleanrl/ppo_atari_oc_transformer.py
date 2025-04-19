@@ -130,6 +130,8 @@ class Args:
     """number of multi-attention heads"""
     num_blocks: int = 3
     """number of transformer blocks"""
+    pooling_type: str = "first"
+    """the type of the pooling layer"""
 
     # Wrapper
     player_name: str = "Player"
@@ -194,6 +196,26 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class Pooling(nn.Module):
+    def __init__(self, type):
+        super().__init__()
+        if type == 'max':
+            self.func = torch.max
+            self.kwargs = {}
+        elif type == 'mean':
+            self.func = torch.mean
+            self.kwargs = {"keepdim": True}
+        elif type == 'first':
+            self.func = lambda x, **kwargs: [x[:,0]]
+            self.kwargs = {}
+        else:
+            raise NotImplementedError
+
+
+    def forward(self, x):
+        tmp = self.func(x, dim=1, **self.kwargs)[0]
+        return tmp
+
 
 class PPOAgent(nn.Module):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
@@ -209,11 +231,11 @@ class PPOAgent(nn.Module):
         self.network = nn.Sequential(
             nn.Linear(dims[1], emb_dim, device=device),
             TransformerEncoder(encoder_layer, num_blocks),
-            nn.Flatten(),
-            nn.Linear(dims[0] * emb_dim, emb_dim, device=device),
-            nn.ReLU(),
+            Pooling(args.pooling_type),
             nn.Linear(emb_dim, emb_dim, device=device),
             nn.ReLU(),
+            # nn.Linear(emb_dim, emb_dim, device=device),
+            # nn.ReLU(),
         )
         self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
         self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
