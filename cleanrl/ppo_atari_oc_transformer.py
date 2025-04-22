@@ -132,6 +132,8 @@ class Args:
     """number of transformer blocks"""
     pooling_type: str = "first"
     """the type of the pooling layer"""
+    num_post_layers: int = 2
+    """number of layers after transformer"""
 
     # Wrapper
     player_name: str = "Player"
@@ -232,11 +234,10 @@ class PPOAgent(nn.Module):
             nn.Linear(dims[1], emb_dim, device=device),
             TransformerEncoder(encoder_layer, num_blocks),
             Pooling(args.pooling_type),
-            nn.Linear(emb_dim, emb_dim, device=device),
-            nn.ReLU(),
-            # nn.Linear(emb_dim, emb_dim, device=device),
-            # nn.ReLU(),
         )
+        for _ in range(args.num_post_layers):
+            self.network.append(nn.Linear(emb_dim, emb_dim, device=device))
+            self.network.append(nn.ReLU())
         self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
         self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
 
