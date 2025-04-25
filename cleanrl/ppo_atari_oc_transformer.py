@@ -17,6 +17,7 @@ from gymnasium import logger
 
 import torch
 import torch.nn as nn
+from torch.nn import TransformerEncoderLayer, TransformerEncoder
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
@@ -36,7 +37,6 @@ if oc_atari_dir is not None:
     sys.path.insert(1, a)
 
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
-from torch.nn import TransformerEncoderLayer, TransformerEncoder
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -130,10 +130,12 @@ class Args:
     """number of multi-attention heads"""
     num_blocks: int = 3
     """number of transformer blocks"""
-    pooling_type: str = "first"
+    pooling_type: str = "max"
     """the type of the pooling layer"""
-    num_post_layers: int = 2
+    num_post_layers: int = 1
     """number of layers after transformer"""
+    masking: bool = True
+    """masking away padding objects for batching purpose"""
 
     # Wrapper
     player_name: str = "Player"
@@ -220,7 +222,7 @@ class Pooling(nn.Module):
 
 
 class PPOAgent(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
+    def __init__(self, envs, emb_dim, num_heads, num_blocks, device, masking=True):
         super().__init__()
 
         self.device = device
@@ -230,22 +232,37 @@ class PPOAgent(nn.Module):
                                                 emb_dim, device=device,
                                                 dropout=0.1, batch_first=True)
 
-        self.network = nn.Sequential(
-            nn.Linear(dims[1], emb_dim, device=device),
-            TransformerEncoder(encoder_layer, num_blocks),
-            Pooling(args.pooling_type),
-        )
+
+        self.encoder = nn.Linear(dims[1], emb_dim, device=device)
+        self.transformer = TransformerEncoder(encoder_layer, num_blocks)
+        self.pooling = Pooling(args.pooling_type)
+        self.network = nn.Sequential()
         for _ in range(args.num_post_layers):
             self.network.append(nn.Linear(emb_dim, emb_dim, device=device))
             self.network.append(nn.ReLU())
         self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
         self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
 
+        if masking:
+            self.forward = self.attend
+        else:
+            self.forward = self._forward
+
+    def attend(self, x):
+        mask = x.count_nonzero(dim=-1).bool()
+
+        x = self.transformer(self.encoder(x), src_key_padding_mask=~mask)
+        return self.pooling(x * mask.unsqueeze(-1))
+
+    def _forward(self, x):
+        return self.pooling(self.transformer(self.encoder(x)))
+
+
     def get_value(self, x):
-        return self.critic(self.network(x))
+        return self.critic(self.forward(x))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x)
+        hidden = self.forward(x)
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
