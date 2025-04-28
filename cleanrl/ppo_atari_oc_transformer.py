@@ -10,10 +10,14 @@ import numpy as np
 
 from tqdm import tqdm
 from rtpt import RTPT
+from pathlib import Path
 from dataclasses import dataclass
 
 import gymnasium as gym
 from gymnasium import logger
+
+# Set CUDA environment variable for determinism
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import torch
 import torch.nn as nn
@@ -28,13 +32,18 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.utils import set_random_seed
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
 if oc_atari_dir is not None:
     a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
     sys.path.insert(1, a)
+
+# Add the evaluation directory to the Python path to import custom evaluation functions
+eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
+sys.path.insert(1, eval_dir)
+from generic_eval import evaluate  # noqa
 
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 
@@ -48,7 +57,7 @@ class Args:
     # General
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 42
+    seed: int = np.random.randint(np.iinfo(int).max)
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -60,10 +69,6 @@ class Args:
     """the id of the environment"""
     obs_mode: str = "ori"
     """observation mode for OCAtari"""
-    feature_func: str = "xywh"
-    """the object features to use as observations"""
-    buffer_window_size: int = 0
-    """length of history in the observations"""
     backend: int = 0
     """Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI"""
     modifs: str = ""
@@ -150,7 +155,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
+def make_env(env_id, idx, capture_video, run_dir):
     def thunk():
         logger.set_level(args.logging_level)
         if args.backend == 2:
@@ -171,9 +176,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
             from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, mode="ram", hud=False, render_mode="rgb_array",
-                render_oc_overlay=False, obs_mode=args.obs_mode,
-                # logger=logger, feature_func=feature_func,
-                # buffer_window_size=window_size
+                render_oc_overlay=False, obs_mode=args.obs_mode
             )
         else:
             raise ValueError("Unknown Backend")
@@ -205,19 +208,17 @@ class Pooling(nn.Module):
         super().__init__()
         if type == 'max':
             self.func = torch.max
-            self.kwargs = {}
         elif type == 'mean':
-            self.func = torch.mean
+            self.func = lambda x, dim: (torch.mean(x, dim=dim),)
             self.kwargs = {"keepdim": True}
         elif type == 'first':
-            self.func = lambda x, **kwargs: [x[:,0]]
-            self.kwargs = {}
+            self.func = lambda x, **kwargs: (x[:,0],)
         else:
             raise NotImplementedError
 
 
     def forward(self, x):
-        tmp = self.func(x, dim=1, **self.kwargs)[0]
+        tmp = self.func(x, dim=1)[0]
         return tmp
 
 
@@ -244,11 +245,11 @@ class PPOAgent(nn.Module):
         self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
 
         if masking:
-            self.forward = self.attend
+            self.forward = self.mask
         else:
             self.forward = self._forward
 
-    def attend(self, x):
+    def mask(self, x):
         mask = x.count_nonzero(dim=-1).bool()
 
         x = self.transformer(self.encoder(x), src_key_padding_mask=~mask)
@@ -316,22 +317,27 @@ if __name__ == "__main__":
 
     logger.set_level(args.logging_level)
 
-    # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func, args.buffer_window_size) for i in range(0, args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0, args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
 
+    # TRY NOT TO MODIFY: seeding
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
+    torch.use_deterministic_algorithms(args.torch_deterministic)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.backends.cudnn.benchmark = not args.torch_deterministic
+    torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
+    envs.action_space.seed(args.seed)
+
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, device)
@@ -512,8 +518,12 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
-        mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
-        wandb.log({"FinalReward": mean})
+        rewards = evaluate(agent, make_env, 10,
+                           env_id=args.env_id,
+                           capture_video=args.capture_video,
+                           run_dir=writer_dir,
+                           device=device)
+        wandb.log({"FinalReward": np.mean(rewards)})
 
         # model
         name = f"{args.exp_name}_s{args.seed}_{args.emb_dim}_{args.num_blocks}_{args.num_heads}"
