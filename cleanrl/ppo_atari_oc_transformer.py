@@ -203,40 +203,36 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Pooling(nn.Module):
-    def __init__(self, type):
-        super().__init__()
-        if type == 'max':
-            self.func = torch.max
-        elif type == 'mean':
-            self.func = lambda x, dim: (torch.mean(x, dim=dim),)
-            self.kwargs = {"keepdim": True}
-        elif type == 'first':
-            self.func = lambda x, **kwargs: (x[:,0],)
-        else:
-            raise NotImplementedError
-
-
-    def forward(self, x):
-        tmp = self.func(x, dim=1)[0]
-        return tmp
-
-
 class PPOAgent(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, device, masking=True):
+    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_obj, device):
         super().__init__()
 
         self.device = device
         dims = envs.observation_space.shape
+        self.num_obj = num_obj
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
                                                 dropout=0.1, batch_first=True)
+        if masking:
+            self.forward = self.mask
+            if args.pooling_type == 'max':
+                self.pooling = lambda x, mask: torch.max(x * mask.unsqueeze(-1), dim=1)[0]
+            elif args.pooling_type == 'mean':
+                self.pooling = lambda x, mask: torch.sum(x, dim=1) / torch.sum(mask, dim=1, keepdim=True)
+            else:
+                raise NotImplementedError
+        else:
+            if args.pooling_type == 'max':
+                self.forward = lambda x: torch.max(self.transformer(self.encoder(x)), dim=1)[0]
+            elif args.pooling_type == 'mean':
+                self.forward = lambda x: torch.mean(self.transformer(self.encoder(x)), dim=1)
+            else:
+                raise NotImplementedError
 
 
         self.encoder = nn.Linear(dims[1], emb_dim, device=device)
         self.transformer = TransformerEncoder(encoder_layer, num_blocks)
-        self.pooling = Pooling(args.pooling_type)
         self.network = nn.Sequential()
         for _ in range(args.num_post_layers):
             self.network.append(nn.Linear(emb_dim, emb_dim, device=device))
@@ -244,19 +240,12 @@ class PPOAgent(nn.Module):
         self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
         self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
 
-        if masking:
-            self.forward = self.mask
-        else:
-            self.forward = self._forward
 
     def mask(self, x):
-        mask = x.count_nonzero(dim=-1).bool()
+        mask = x[..., :self.num_obj].sum(dim=-1, dtype=bool)
 
         x = self.transformer(self.encoder(x), src_key_padding_mask=~mask)
-        return self.pooling(x * mask.unsqueeze(-1))
-
-    def _forward(self, x):
-        return self.pooling(self.transformer(self.encoder(x)))
+        return self.pooling(x, mask)
 
 
     def get_value(self, x):
@@ -272,7 +261,7 @@ class PPOAgent(nn.Module):
 
     def predict(self, x, states=None, **_):
         with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
+            return np.argmax(self.actor(self.forward(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
 
 if __name__ == "__main__":
@@ -340,7 +329,7 @@ if __name__ == "__main__":
 
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, device)
+    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_obj", 0)[0], device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
