@@ -141,6 +141,8 @@ class Args:
     """number of layers after transformer"""
     masking: bool = True
     """masking away padding objects for batching purpose"""
+    dropout: float = 0.1
+    """dropout probability in the transformer layers"""
 
     # Wrapper
     player_name: str = "Player"
@@ -213,13 +215,15 @@ class PPOAgent(nn.Module):
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
-                                                dropout=0.1, batch_first=True)
+                                                dropout=args.dropout, batch_first=True)
         if masking:
             self.forward = self.mask
             if args.pooling_type == 'max':
                 self.pooling = lambda x, mask: torch.max(x * mask.unsqueeze(-1), dim=1)[0]
             elif args.pooling_type == 'mean':
                 self.pooling = lambda x, mask: torch.sum(x, dim=1) / torch.sum(mask, dim=1, keepdim=True)
+            elif args.pooling_type == 'first':
+                self.pooling = lambda x, mask: x[:, 0, :]
             else:
                 raise NotImplementedError
         else:
@@ -227,6 +231,8 @@ class PPOAgent(nn.Module):
                 self.forward = lambda x: torch.max(self.transformer(self.encoder(x)), dim=1)[0]
             elif args.pooling_type == 'mean':
                 self.forward = lambda x: torch.mean(self.transformer(self.encoder(x)), dim=1)
+            elif args.pooling_type == 'first':
+                self.forward = lambda x: self.transformer(self.encoder(x))[:, 0, :]
             else:
                 raise NotImplementedError
 
@@ -244,7 +250,7 @@ class PPOAgent(nn.Module):
     def mask(self, x):
         mask = x[..., :self.num_obj].sum(dim=-1, dtype=bool)
 
-        x = self.transformer(self.encoder(x), src_key_padding_mask=~mask)
+        x = self.network(self.transformer(self.encoder(x), src_key_padding_mask=~mask))
         return self.pooling(x, mask)
 
 
