@@ -147,6 +147,10 @@ class Args:
     # Wrapper
     player_name: str = "Player"
     """the name of the player category"""
+    use_polar_coordinates: bool = False
+    """use egocentric polar coordinates instead of cartesian coordinates"""
+    relative_velocity: bool = True
+    """use relative velocity as well"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -193,7 +197,9 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = OCWrapper(env, args.player_name, include_type=True)
+        env = OCWrapper(env, args.player_name, include_type=True,
+                        use_polar_coordinates=args.use_polar_coordinates,
+                        relative_velocity=args.relative_velocity)
 
         return env
 
