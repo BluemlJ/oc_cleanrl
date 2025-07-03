@@ -95,11 +95,11 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author : str = "JB"
+    author: str = "JB"
     """Initials of the author"""
 
     # Algorithm-specific arguments
-    architecture : str = "PPO"
+    architecture: str = "PPO"
     """ Specifies the used architecture"""
 
     total_timesteps: int = 20_000_000
@@ -168,6 +168,8 @@ class Args:
 global args
 
 # Function to create a gym environment with the specified settings
+
+
 def make_env(env_id, idx, capture_video, run_dir):
     """
     Creates a gym environment with the specified settings.
@@ -198,7 +200,8 @@ def make_env(env_id, idx, capture_video, run_dir):
             )
         elif args.backend == "Gym":
             # Use Gym backend with image preprocessing wrappers
-            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
+            env = gym.make(env_id, render_mode="rgb_array",
+                           frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
             env = gym.wrappers.FrameStack(env, args.buffer_window_size)
@@ -262,7 +265,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(writer_dir)
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % (
+            "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # Create RTPT object to monitor progress with estimated time remaining
@@ -272,7 +276,8 @@ if __name__ == "__main__":
 
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
     # Environment setup
@@ -284,7 +289,7 @@ if __name__ == "__main__":
         ]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
-    
+
     # Seeding the environment and PyTorch for reproducibility
     os.environ['PYTHONHASHSEED'] = str(args.seed)
     torch.use_deterministic_algorithms(args.torch_deterministic)
@@ -296,11 +301,12 @@ if __name__ == "__main__":
     set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
-    
+
     # Define the agent's architecture based on command line arguments
     if args.architecture == "OCT":
         from architectures.transformer import OCTransformer as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device).to(device)
+        agent = Agent(envs, args.emb_dim, args.num_heads,
+                      args.num_blocks, device).to(device)
     elif args.architecture == "VIT":
         from architectures.transformer import VIT as Agent
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
@@ -321,16 +327,20 @@ if __name__ == "__main__":
         agent = Agent(envs, device).to(device)
     elif args.architecture == "PPO_OBJ":
         from architectures.ppo import PPObj as Agent
-        agent = Agent(envs, device, args.encoder_dims, args.decoder_dims).to(device)
+        agent = Agent(envs, device, args.encoder_dims,
+                      args.decoder_dims).to(device)
     else:
-        raise NotImplementedError(f"Architecture {args.architecture} does not exist!")
+        raise NotImplementedError(
+            f"Architecture {args.architecture} does not exist!")
 
     # Initialize optimizer for training
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Allocate storage for observations, actions, rewards, etc.
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) +
+                      envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) +
+                          envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -365,15 +375,18 @@ if __name__ == "__main__":
 
             # Get action and value from agent
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agent.get_action_and_value(
+                    next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # Execute the game and store reward, next observation, and done flag
-            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
+            next_obs, reward, next_done, infos = envs.step(
+                action.cpu().numpy())
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            next_obs, next_done = torch.Tensor(next_obs).to(
+                device), torch.Tensor(next_done).to(device)
 
             # Track episode-level statistics if a game is done
             if 1 in next_done:
@@ -400,8 +413,10 @@ if __name__ == "__main__":
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                delta = rewards[t] + args.gamma * \
+                    nextvalues * nextnonterminal - values[t]
+                advantages[t] = lastgaelam = delta + args.gamma * \
+                    args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
         # Flatten the batch for optimization
@@ -421,7 +436,8 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    b_obs[mb_inds], b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -429,16 +445,19 @@ if __name__ == "__main__":
                     # Calculate approximate KL divergence
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                    clipfracs += [((ratio - 1.0).abs() >
+                                   args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
                     # Normalize advantages
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (
+                        mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss2 = -mb_advantages * \
+                    torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -454,7 +473,8 @@ if __name__ == "__main__":
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * \
+                        ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 # Entropy loss (for exploration)
                 entropy_loss = entropy.mean()
@@ -463,7 +483,8 @@ if __name__ == "__main__":
                 # Backpropagation and optimizer step
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(
+                    agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
@@ -472,26 +493,34 @@ if __name__ == "__main__":
         # Compute explained variance (diagnostic measure for value function fit quality)
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        explained_var = np.nan if var_y == 0 else 1 - \
+            np.var(y_true - y_pred) / var_y
 
         # Log episode statistics for Tensorboard
         if done_in_episode:
             if args.new_rf:
-                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
-            writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
-            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
+                writer.add_scalar("charts/Episodic_New_Reward",
+                                  enewr / count, global_step)
+            writer.add_scalar("charts/Episodic_Original_Reward",
+                              eorgr / count, global_step)
+            writer.add_scalar("charts/Episodic_Length",
+                              elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
         # Log other statistics
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("charts/learning_rate",
+                          optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+        writer.add_scalar("losses/old_approx_kl",
+                          old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar("losses/explained_variance",
+                          explained_var, global_step)
+        writer.add_scalar("charts/SPS", int(global_step /
+                          (time.time() - start_time)), global_step)
 
         # Update RTPT for progress tracking
         rtpt.step()
