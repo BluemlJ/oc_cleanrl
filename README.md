@@ -35,9 +35,13 @@ CleanRL is a Deep Reinforcement Learning library that provides high-quality, sin
 
 We keep this fork up to date with the original CleanRL master branch to enable further adaptations of algorithms for object-centered representations. For more details, you can:
 
+<<<<<<< HEAD
 - [Check out the original CleanRL README](./docs/index.md)
 - Read the [JMLR paper](https://www.jmlr.org/papers/volume23/21-1342/21-1342.pdf)
 - Visit the [CleanRL Documentation](https://docs.cleanrl.dev/)
+=======
+> ⚠️ **NOTE**: CleanRL is *not* a modular library and therefore it is not meant to be imported. At the cost of duplicate code, we make all implementation details of a DRL algorithm variant easy to understand, so CleanRL comes with its own pros and cons. You should consider using CleanRL if you want to 1) understand all implementation details of an algorithm's variant or 2) prototype advanced features that other modular DRL libraries do not support (CleanRL has minimal lines of code so it gives you great debugging experience and you don't have do a lot of subclassing like sometimes in modular DRL libraries).
+>>>>>>> upstream/master
 
 > **⚠️ Note**  
 > CleanRL is *not* a modular library. This means it is not meant to be imported as a library. Instead, it is designed to make all implementation details of a DRL algorithm variant easy to understand, at the cost of duplicate code. Use CleanRL if you want to:
