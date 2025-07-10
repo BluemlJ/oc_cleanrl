@@ -35,6 +35,8 @@ import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 
+import ocatari_wrappers
+
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
@@ -52,6 +54,7 @@ sys.path.insert(1, eval_dir)
 
 @dataclass
 class Args:
+    # General
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
@@ -60,20 +63,52 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+
+    # Environment parameters
+    env_id: str = "ALE/Pong-v5"
+    """the id of the environment"""
+    obs_mode: str = "dqn"
+    """observation mode for OCAtari"""
+    buffer_window_size: int = 4
+    """length of history in the observations"""
+    backend: str = "HackAtari"
+    """Which Backend should we use"""
+    modifs: str = ""
+    """Modifications for Hackatari"""
+    new_rf: str = ""
+    """Path to a new reward functions for OCALM and HACKATARI"""
+    frameskip: int = 4
+    """the frame skipping option of the environment"""
+    masked_wrapper: str = ""
+    """The OCCAM wrapper to use"""
+
+    # Tracking (Logging and monitoring configurations)
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "OC-Transformer"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
+    wandb_dir: str = None
+    """the wandb directory"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
+    ckpt: str = ""
+    """Path to a checkpoint to a model to start training from"""
+    logging_level: int = 40
+    """Logging level for the Gymnasium logger"""
+    author: str = "JB"
+    """Initials of the author"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
+
+    # Algorithm-specific arguments
+    architecture: str = "Rainbow"
+    """the architecture of the agent, e.g., Rainbow, PPO, etc."""
 
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
@@ -115,41 +150,6 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
-
-    # Environment parameters
-    env_id: str = "ALE/Pong-v5"
-    """the id of the environment"""
-    obs_mode: str = "dqn"
-    """observation mode for OCAtari"""
-    buffer_window_size: int = 4
-    """length of history in the observations"""
-    backend: str = "HackAtari"
-    """Which Backend should we use"""
-    modifs: str = ""
-    """Modifications for Hackatari"""
-    new_rf: str = ""
-    """Path to a new reward functions for OCALM and HACKATARI"""
-    frameskip: int = 4
-    """the frame skipping option of the environment"""
-
-    # Tracking (Logging and monitoring configurations)
-    wandb_project_name: str = "OC-Transformer"
-    """the wandb's project name"""
-    wandb_entity: str = "AIML_OC"
-    """the entity (team) of wandb's project"""
-    wandb_dir: str = None
-    """the wandb directory"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
-    ckpt: str = ""
-    """Path to a checkpoint to a model to start training from"""
-    logging_level: int = 40
-    """Logging level for the Gymnasium logger"""
-    author: str = "JB"
-    """Initials of the author"""
-    architecture: str = "Rainbow"
-    """the architecture of the agent, e.g., Rainbow, PPO, etc."""
-    masked_wrapper: str = ""
 
 # Global variable to hold parsed arguments
 global args
@@ -209,17 +209,13 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
         # If masked obs_mode are set, apply correct wrapper
         if args.masked_wrapper == "masked_dqn_bin":
-            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
-                                                     include_pixels=args.add_pixels)
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size)
         elif args.masked_wrapper == "masked_dqn_pixels":
-            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
-                                                    include_pixels=args.add_pixels)
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size)
         elif args.masked_wrapper == "masked_dqn_grayscale":
-            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
-                                                         include_pixels=args.add_pixels)
-        #elif args.masked_wrapper == "masked_dqn_planes":
-        #    env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
-        #                                                 include_pixels=args.add_pixels)
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size)
+        elif args.masked_wrapper == "masked_dqn_planes":
+           env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size)
         #elif args.masked_wrapper == "masked_dqn_pixel_planes":
         #    env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
         #                                                 include_pixels=args.add_pixels)
@@ -289,7 +285,7 @@ class NoisyDuelingDistributionalNetwork(nn.Module):
         self.register_buffer("support", torch.linspace(v_min, v_max, n_atoms))
 
         self.network = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
+            nn.Conv2d(env.observation_space.shape[1], 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
