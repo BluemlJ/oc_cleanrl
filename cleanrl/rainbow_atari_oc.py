@@ -38,9 +38,6 @@ from torch.utils.tensorboard import SummaryWriter
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
-from generic_eval import evaluate  # noqa
-
-
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -78,7 +75,7 @@ class Args:
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
-    total_timesteps: int = 10000000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 0.0000625
     """the learning rate of the optimizer"""
@@ -135,6 +132,24 @@ class Args:
     frameskip: int = 4
     """the frame skipping option of the environment"""
 
+    # Tracking (Logging and monitoring configurations)
+    wandb_project_name: str = "OC-Transformer"
+    """the wandb's project name"""
+    wandb_entity: str = "AIML_OC"
+    """the entity (team) of wandb's project"""
+    wandb_dir: str = None
+    """the wandb directory"""
+    capture_video: bool = False
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    ckpt: str = ""
+    """Path to a checkpoint to a model to start training from"""
+    logging_level: int = 40
+    """Logging level for the Gymnasium logger"""
+    author: str = "JB"
+    """Initials of the author"""
+    architecture: str = "Rainbow"
+    """the architecture of the agent, e.g., Rainbow, PPO, etc."""
+    masked_wrapper: str = ""
 
 # Global variable to hold parsed arguments
 global args
@@ -158,12 +173,24 @@ def make_env(env_id, seed, idx, capture_video, run_name):
                 dopamine_pooling=True
             )
         elif args.backend == "Gym":
-            # Use Gym backend with image preprocessing wrappers
-            env = gym.make(env_id, render_mode="rgb_array",
-                           frameskip=args.frameskip)
+            if capture_video and idx == 0:
+                env = gym.make(env_id, render_mode="rgb_array")
+                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            else:
+                env = gym.make(env_id)
+            env = gym.wrappers.RecordEpisodeStatistics(env)
+
+            #env = NoopResetEnv(env, noop_max=30)
+            env = MaxAndSkipEnv(env, skip=4)
+            #env = EpisodicLifeEnv(env)
+            #if "FIRE" in env.unwrapped.get_action_meanings():
+            #    env = FireResetEnv(env)
+            env = ClipRewardEnv(env)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
+            env = gym.wrappers.FrameStack(env, 4)
+
+            env.action_space.seed(seed)
         else:
             raise ValueError("Unknown Backend")
 
@@ -179,6 +206,28 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
+
+        # If masked obs_mode are set, apply correct wrapper
+        if args.masked_wrapper == "masked_dqn_bin":
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                     include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixels":
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                    include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_grayscale":
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        #elif args.masked_wrapper == "masked_dqn_planes":
+        #    env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+        #                                                 include_pixels=args.add_pixels)
+        #elif args.masked_wrapper == "masked_dqn_pixel_planes":
+        #    env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+        #                                                 include_pixels=args.add_pixels)
+        #elif args.masked_wrapper == "masked_dl":
+        #    env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
+        #                                     include_pixels=args.add_pixels)
+        #elif args.masked_wrapper == "masked_dl_grouped":
+        #    env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
 
         return env
 
@@ -474,6 +523,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             save_code=True,
             dir=args.wandb_dir
         )
+            
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
@@ -487,9 +537,21 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        import ocatari_wrappers
+
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "ori"
+        
     # Create RTPT object to monitor progress with estimated time remaining
     rtpt = RTPT(name_initials=args.author, experiment_name='OCCAM_Rainbow',
-                max_iterations=args.num_iterations)
+                max_iterations=args.total_timesteps // args.train_frequency)
     rtpt.start()  # Start RTPT tracking
 
     # TRY NOT TO MODIFY: seeding
@@ -532,7 +594,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    for global_step in range(args.total_timesteps):
+    pbar = tqdm(range(1, args.total_timesteps+1), postfix=postfix)
+    for global_step in pbar:
         # anneal PER beta to 1
         rb.beta = min(
             1.0, args.prioritized_replay_beta + global_step *
@@ -552,8 +615,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    print(
-                        f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    #print(
+                    #    f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    pbar.set_description(f"Reward: {info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return",
                                       info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length",
@@ -637,7 +701,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     writer.add_scalar("losses/q_values",
                                       q_values.mean().item(), global_step)
                     sps = int(global_step / (time.time() - start_time))
-                    print("SPS:", sps)
+                    #print("SPS:", sps)
                     writer.add_scalar("charts/SPS", sps, global_step)
                     writer.add_scalar("charts/beta", rb.beta, global_step)
 
@@ -666,31 +730,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
-        # Evaluate agent's performance
-        args.new_rf = ""
-        rewards = evaluate(
-            q_network, make_env, 10,
-            env_id=args.env_id,
-            capture_video=args.capture_video,
-            run_dir=writer_dir,
-            device=device
-        )
-
-        wandb.log({"FinalReward": np.mean(rewards)})
-
-        if args.test_modifs != "":
-            args.modifs = args.test_modifs
-            args.backend = "HackAtari"
-            rewards = evaluate(
-                q_network, make_env, 10,
-                env_id=args.env_id,
-                capture_video=args.capture_video,
-                run_dir=writer_dir,
-                device=device
-            )
-
-            wandb.log({"HackAtariReward": np.mean(rewards)})
-
+        
         # Log model to Weights and Biases
         name = f"{args.exp_name}_s{args.seed}"
         run.log_model(model_path, name)  # noqa: cannot be undefined
