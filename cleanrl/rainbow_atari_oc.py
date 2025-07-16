@@ -151,6 +151,12 @@ class Args:
     v_max: float = 10
     """the return upper bound"""
 
+    # PPObj network parameters
+    encoder_dims: list[int] = (256, 512, 1024, 512)
+    """layer dimensions before nn.Flatten()"""
+    decoder_dims: list[int] = (512,)
+    """layer dimensions after nn.Flatten()"""
+
 # Global variable to hold parsed arguments
 global args
 
@@ -567,12 +573,21 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     assert isinstance(envs.single_action_space,
                       gym.spaces.Discrete), "only discrete action space is supported"
 
+    kwargs = {}
+    # object input needs different network
+    if args.obs_mode == "obj":
+        from architectures.rainbow import NoisyDuelingDistributionalPPObj as NoisyDuelingDistributionalNetwork
+        kwargs = {
+            "encoder_dims": args.encoder_dims,
+            "decoder_dims": args.decoder_dims
+        }
+
     q_network = NoisyDuelingDistributionalNetwork(
-        envs, args.n_atoms, args.v_min, args.v_max).to(device)
+        envs, args.n_atoms, args.v_min, args.v_max, **kwargs).to(device)
     optimizer = optim.Adam(q_network.parameters(),
                            lr=args.learning_rate, eps=1.5e-4)
     target_network = NoisyDuelingDistributionalNetwork(
-        envs, args.n_atoms, args.v_min, args.v_max).to(device)
+        envs, args.n_atoms, args.v_min, args.v_max, **kwargs).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = PrioritizedReplayBuffer(
