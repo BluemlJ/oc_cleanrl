@@ -50,6 +50,7 @@ eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
 from generic_eval import evaluate  # noqa
 
+
 # Command line argument configuration using dataclass
 @dataclass
 class Args:
@@ -103,7 +104,7 @@ class Args:
     architecture: str = "DQN"
     """Specifies the used architecture"""
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
@@ -134,9 +135,16 @@ class Args:
     test_modifs: str = ""
     """Modifications for Hackatari"""
 
+    # to be filled in runtime
+    masked_wrapper: str = ""
+    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    add_pixels: bool = False
+    """should the grayscale game screen be added to the observations (set in runtime)"""
+
 
 # Global variable to hold parsed arguments
 global args
+
 
 # Function to create a gym environment with the specified settings
 def make_env(env_id, idx, capture_video, run_dir):
@@ -157,7 +165,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "OCAtari":
             from ocatari.core import OCAtari
@@ -166,7 +175,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 hud=False,
                 render_mode="rgb_array",
                 obs_mode=args.obs_mode,
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "Gym":
             # Use Gym backend with image preprocessing wrappers
@@ -179,7 +189,8 @@ def make_env(env_id, idx, capture_video, run_dir):
 
         # Capture video if required
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos",
+            env = gym.wrappers.RecordVideo(env,
+                                           f"{run_dir}/media/videos",
                                            disable_logger=True)
 
         # Apply standard Atari environment wrappers
@@ -194,14 +205,32 @@ def make_env(env_id, idx, capture_video, run_dir):
             from ocrltransformer.wrappers import OCWrapper
             env = OCWrapper(env)
 
+        # If masked obs_mode are set, apply correct wrapper
+        elif args.masked_wrapper == "masked_dqn_bin":
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                     include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixels":
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                    include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_grayscale":
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_planes":
+            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                               include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixel_planes":
+            env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                          include_pixels=args.add_pixels)
+
         return env
 
     return thunk
 
-    
+
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
+
 
 if __name__ == "__main__":
     # Parse command-line arguments using Tyro
@@ -229,16 +258,28 @@ if __name__ == "__main__":
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
 
-     # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
+    # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
     writer = SummaryWriter(writer_dir)
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        import ocatari_wrappers
+
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "ori"
+
     # Create RTPT object to monitor progress with estimated time remaining
     rtpt = RTPT(name_initials=args.author, experiment_name="OCALM",
-        max_iterations=args.total_timesteps)
+                max_iterations=args.total_timesteps)
     rtpt.start()  # Start RTPT tracking
 
     # Set logger level and determine whether to use GPU or CPU for computation
@@ -267,12 +308,12 @@ if __name__ == "__main__":
     set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
-    
+
     q_network = QNetwork(envs).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = QNetwork(envs).to(device)
     target_network.load_state_dict(q_network.state_dict())
-    
+
     rb = ReplayBuffer(
         args.buffer_size,
         envs.observation_space,
@@ -280,6 +321,7 @@ if __name__ == "__main__":
         device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
+        n_envs=args.num_envs
     )
 
     # Start training loop
@@ -309,7 +351,7 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, next_done, infos = envs.step(actions)
-        
+
         # Track episode-level statistics if a game is done
         if 1 in next_done:
             for info in infos:
@@ -322,10 +364,10 @@ if __name__ == "__main__":
                     else:
                         eorgr += info["episode"]["r"].item()
                     elength += info["episode"]["l"]
-                
+
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         rb.add(obs, next_obs, actions, reward, next_done, infos)
-                    
+
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
 
@@ -344,7 +386,7 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     # print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-                    
+
                 # optimize the model
                 optimizer.zero_grad()
                 loss.backward()
@@ -356,7 +398,7 @@ if __name__ == "__main__":
                     target_network_param.data.copy_(
                         args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
                     )
-            
+
         # Log episode statistics for Tensorboard
         if done_in_episode:
             if args.new_rf:
@@ -384,6 +426,10 @@ if __name__ == "__main__":
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
+        # Log model to Weights and Biases
+        name = f"{args.exp_name}_s{args.seed}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
         # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(
@@ -409,13 +455,10 @@ if __name__ == "__main__":
 
             wandb.log({"HackAtariReward": np.mean(rewards)})
 
-        # Log model to Weights and Biases
-        name = f"{args.exp_name}_s{args.seed}"
-        run.log_model(model_path, name)  # noqa: cannot be undefined
-
         # Log video of agent's performance
         if args.capture_video:
             import glob
+
             list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
             latest_video = max(list_of_videos, key=os.path.getctime)
             wandb.log({"video": wandb.Video(latest_video)})

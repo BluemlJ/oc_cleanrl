@@ -10,8 +10,11 @@ class PPODefault(Predictor):
     def __init__(self, envs, device):
         super().__init__()
         self.device = device
+
+        dims = envs.observation_space.shape
+
         self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            layer_init(nn.Conv2d(dims[0], 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),

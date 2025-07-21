@@ -29,6 +29,7 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
+import ocatari_wrappers
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -97,12 +98,14 @@ class Args:
     """Logging level for the Gymnasium logger"""
     author: str = "JB"
     """Initials of the author"""
+    checkpoint_interval: int = 40
+    """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
     architecture: str = "PPO"
     """ Specifies the used architecture"""
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -155,6 +158,14 @@ class Args:
     test_modifs: str = ""
     """Modifications for Hackatari"""
 
+    # Imperfect detection
+    detection_failure_probability: float = 0.0
+    """probability that an object is not detected"""
+    mislabeling_probability: float = 0.0
+    """probability that an object is labeled incorrectly"""
+    noise_std: float = 0.0
+    """noise added to position and dimensions of objects"""
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -162,18 +173,22 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    masked_wrapper: str = ""
+    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    add_pixels: bool = False
+    """should the grayscale game screen be added to the observations (set in runtime)"""
 
 
 # Global variable to hold parsed arguments
 global args
 
+
 # Function to create a gym environment with the specified settings
-
-
 def make_env(env_id, idx, capture_video, run_dir):
     """
     Creates a gym environment with the specified settings.
     """
+
     def thunk():
         logger.set_level(args.logging_level)
         # Setup environment based on backend type (HackAtari, OCAtari, Gym)
@@ -187,7 +202,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                 obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "OCAtari":
             from ocatari.core import OCAtari
@@ -196,12 +212,12 @@ def make_env(env_id, idx, capture_video, run_dir):
                 hud=False,
                 render_mode="rgb_array",
                 obs_mode=args.obs_mode,
-                frameskip=args.frameskip
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "Gym":
             # Use Gym backend with image preprocessing wrappers
-            env = gym.make(env_id, render_mode="rgb_array",
-                           frameskip=args.frameskip)
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
             env = gym.wrappers.FrameStack(env, args.buffer_window_size)
@@ -221,10 +237,39 @@ def make_env(env_id, idx, capture_video, run_dir):
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        # If architecture is OCT, apply OCWrapper to environment
-        if args.architecture == "OCT":
-            from ocrltransformer.wrappers import OCWrapper
-            env = OCWrapper(env)
+        # Add failures to test robustness
+        if (args.detection_failure_probability > 0
+                or args.mislabeling_probability > 0
+                or args.noise_std > 0):
+
+            env = ocatari_wrappers.ImperfectDetectionWrapper(
+                env,
+                args.detection_failure_probability,
+                args.mislabeling_probability,
+                args.noise_std
+            )
+
+        # If masked obs_mode are set, apply correct wrapper
+        if args.masked_wrapper == "masked_dqn_bin":
+            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                     include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixels":
+            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                    include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_grayscale":
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                         include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_planes":
+            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                               include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dqn_pixel_planes":
+            env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
+                                                          include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl":
+            env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
+                                             include_pixels=args.add_pixels)
+        elif args.masked_wrapper == "masked_dl_grouped":
+            env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
 
         return env
 
@@ -265,9 +310,18 @@ if __name__ == "__main__":
     writer = SummaryWriter(writer_dir)
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % (
-            "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    # prepare for masking wrappers
+    if "masked" in args.obs_mode:
+        if args.obs_mode.endswith("+pixels"):
+            args.masked_wrapper = args.obs_mode[:-7]
+            args.add_pixels = True
+        else:
+            args.masked_wrapper = args.obs_mode
+            args.add_pixels = False
+        args.obs_mode = "ori"
 
     # Create RTPT object to monitor progress with estimated time remaining
     rtpt = RTPT(name_initials=args.author, experiment_name='OCALM',
@@ -276,8 +330,7 @@ if __name__ == "__main__":
 
     # Set logger level and determine whether to use GPU or CPU for computation
     logger.set_level(args.logging_level)
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
     # Environment setup
@@ -305,42 +358,44 @@ if __name__ == "__main__":
     # Define the agent's architecture based on command line arguments
     if args.architecture == "OCT":
         from architectures.transformer import OCTransformer as Agent
-        agent = Agent(envs, args.emb_dim, args.num_heads,
-                      args.num_blocks, device).to(device)
+
+        agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks, device).to(device)
     elif args.architecture == "VIT":
         from architectures.transformer import VIT as Agent
+
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
                       args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "VIT2":
         from architectures.transformer import SimpleViT2 as Agent
+
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
                       args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "MobileVit":
         from architectures.transformer import MobileVIT as Agent
+
         agent = Agent(envs, args.emb_dim, device).to(device)
     elif args.architecture == "MobileVit2":
         from architectures.transformer import MobileViT2 as Agent
+
         agent = Agent(envs, args.emb_dim, args.num_heads, args.num_blocks,
                       args.patch_size, args.buffer_window_size, device).to(device)
     elif args.architecture == "PPO":
         from architectures.ppo import PPODefault as Agent
+
         agent = Agent(envs, device).to(device)
     elif args.architecture == "PPO_OBJ":
         from architectures.ppo import PPObj as Agent
-        agent = Agent(envs, device, args.encoder_dims,
-                      args.decoder_dims).to(device)
+
+        agent = Agent(envs, device, args.encoder_dims, args.decoder_dims).to(device)
     else:
-        raise NotImplementedError(
-            f"Architecture {args.architecture} does not exist!")
+        raise NotImplementedError(f"Architecture {args.architecture} does not exist!")
 
     # Initialize optimizer for training
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Allocate storage for observations, actions, rewards, etc.
-    obs = torch.zeros((args.num_steps, args.num_envs) +
-                      envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) +
-                          envs.action_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -367,6 +422,22 @@ if __name__ == "__main__":
         count = 0
         done_in_episode = False
 
+        if iteration % args.checkpoint_interval == 0:
+            # Save the trained model to disk
+            model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
+            model_data = {
+                "model_weights": agent.state_dict(),
+                "args": vars(args),
+                "Timesteps": iteration * args.batch_size
+            }
+            torch.save(model_data, model_path)
+            logger.info(f"model saved to {model_path} in epoch {epoch}")
+
+            # Log model with Weights and Biases if enabled
+            if args.track:
+                name = f"{args.exp_name}_s{args.seed}"
+                run.log_model(model_path, name)  # noqa: cannot be undefined
+
         # Perform rollout in each environment
         for step in range(0, args.num_steps):
             global_step += args.num_envs
@@ -375,18 +446,15 @@ if __name__ == "__main__":
 
             # Get action and value from agent
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(
-                    next_obs)
+                action, logprob, _, value = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # Execute the game and store reward, next observation, and done flag
-            next_obs, reward, next_done, infos = envs.step(
-                action.cpu().numpy())
+            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(
-                device), torch.Tensor(next_done).to(device)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
             # Track episode-level statistics if a game is done
             if 1 in next_done:
@@ -413,10 +481,8 @@ if __name__ == "__main__":
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * \
-                    nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * \
-                    args.gae_lambda * nextnonterminal * lastgaelam
+                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
         # Flatten the batch for optimization
@@ -436,8 +502,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -445,19 +510,16 @@ if __name__ == "__main__":
                     # Calculate approximate KL divergence
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() >
-                                   args.clip_coef).float().mean().item()]
+                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
                     # Normalize advantages
-                    mb_advantages = (
-                        mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * \
-                    torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -473,8 +535,7 @@ if __name__ == "__main__":
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * \
-                        ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 # Entropy loss (for exploration)
                 entropy_loss = entropy.mean()
@@ -483,8 +544,7 @@ if __name__ == "__main__":
                 # Backpropagation and optimizer step
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(
-                    agent.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
@@ -493,40 +553,32 @@ if __name__ == "__main__":
         # Compute explained variance (diagnostic measure for value function fit quality)
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - \
-            np.var(y_true - y_pred) / var_y
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # Log episode statistics for Tensorboard
         if done_in_episode:
             if args.new_rf:
-                writer.add_scalar("charts/Episodic_New_Reward",
-                                  enewr / count, global_step)
-            writer.add_scalar("charts/Episodic_Original_Reward",
-                              eorgr / count, global_step)
-            writer.add_scalar("charts/Episodic_Length",
-                              elength / count, global_step)
+                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
+            writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
+            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
         # Log other statistics
-        writer.add_scalar("charts/learning_rate",
-                          optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl",
-                          old_approx_kl.item(), global_step)
+        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance",
-                          explained_var, global_step)
-        writer.add_scalar("charts/SPS", int(global_step /
-                          (time.time() - start_time)), global_step)
+        writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
         # Update RTPT for progress tracking
         rtpt.step()
 
     # Save the trained model to disk
-    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
+    model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
     model_data = {
         "model_weights": agent.state_dict(),
         "args": vars(args),
@@ -536,6 +588,10 @@ if __name__ == "__main__":
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
+        # Log model to Weights and Biases
+        name = f"{args.exp_name}_s{args.seed}"
+        run.log_model(model_path, name)  # noqa: cannot be undefined
+
         # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(agent, make_env, 10,
@@ -557,13 +613,10 @@ if __name__ == "__main__":
 
             wandb.log({"HackAtariReward": np.mean(rewards)})
 
-        # Log model to Weights and Biases
-        name = f"{args.exp_name}_s{args.seed}"
-        run.log_model(model_path, name)  # noqa: cannot be undefined
-
         # Log video of agent's performance
         if args.capture_video:
             import glob
+
             list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
             latest_video = max(list_of_videos, key=os.path.getctime)
             wandb.log({"video": wandb.Video(latest_video)})

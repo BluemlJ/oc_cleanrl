@@ -8,8 +8,11 @@ from .common import Predictor, layer_init
 class QNetwork(Predictor):
     def __init__(self, env):
         super().__init__()
+
+        dims = env.observation_space.shape
+
         self.network = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
+            nn.Conv2d(dims[0], 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
@@ -27,7 +30,7 @@ class QNetwork(Predictor):
     def get_action_and_value(self, x):
         q_values = self.network(x / 255.0)
         action = torch.argmax(q_values, 1)
-        return action, q_values[action], None, None
+        return action, q_values[:, action], None, None
 
 
 class QNetwork_C51(Predictor):
@@ -37,8 +40,9 @@ class QNetwork_C51(Predictor):
         self.n_atoms = n_atoms
         self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
         self.n = env.action_space.n
+        dims = env.observation_space.shape
         self.network = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
+            nn.Conv2d(dims[0], 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
