@@ -29,6 +29,8 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
+from typing import Literal
+
 import ocatari_wrappers
 
 # Suppress warnings to avoid cluttering output
@@ -66,25 +68,26 @@ class Args:
     # Environment parameters
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "dqn"
+    obs_mode: Literal[
+        "dqn", "obj", "masked_dqn_bin", "masked_dqn_pixels",
+        "masked_dqn_planes", "masked_dqn_grayscale", "masked_dqn_pixel_planes"
+    ] = "dqn"
     """observation mode for OCAtari"""
-    feature_func: str = ""
-    """the object features to use as observations"""
     buffer_window_size: int = 4
     """length of history in the observations"""
-    backend: str = "OCAtari"
+    backend: Literal["OCAtari", "HackAtari", "Gym"] = "OCAtari"
     """Which Backend should we use"""
     modifs: str = ""
-    """Modifications for Hackatari"""
+    """Modifications for HackAtari"""
     new_rf: str = ""
-    """Path to a new reward functions for OCALM and HACKATARI"""
+    """Path to a new reward functions for HackAtari"""
     frameskip: int = 4
     """the frame skipping option of the environment"""
 
     # Tracking (Logging and monitoring configurations)
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "OC-Transformer"
+    wandb_project_name: str = "OCCAM"
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
@@ -96,14 +99,14 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author: str = "JB"
+    author: str = "JD"
     """Initials of the author"""
     checkpoint_interval: int = 40
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
     architecture: str = "PPO"
-    """ Specifies the used architecture"""
+    """the architecture to use"""
 
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
@@ -114,7 +117,7 @@ class Args:
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
-    """Toggle learning rate annealing for policy and value networks"""
+    """toggle learning rate annealing for policy and value networks"""
     gamma: float = 0.99
     """the discount factor gamma"""
     gae_lambda: float = 0.95
@@ -156,7 +159,7 @@ class Args:
 
     # HackAtari testing
     test_modifs: str = ""
-    """Modifications for Hackatari"""
+    """modifications for HackAtari"""
 
     # Imperfect detection
     detection_failure_probability: float = 0.0
@@ -168,15 +171,15 @@ class Args:
 
     # to be filled in runtime
     batch_size: int = 0
-    """the batch size (computed in runtime)"""
+    """the batch size (computed at runtime)"""
     minibatch_size: int = 0
-    """the mini-batch size (computed in runtime)"""
+    """the mini-batch size (computed at runtime)"""
     num_iterations: int = 0
-    """the number of iterations (computed in runtime)"""
-    masked_wrapper: str = ""
-    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    """the number of iterations (computed at runtime)"""
+    masked_wrapper: str = None
+    """the obs_mode if a masking wrapper is needed (set at runtime)"""
     add_pixels: bool = False
-    """should the grayscale game screen be added to the observations (set in runtime)"""
+    """should the grayscale game screen be added to the observations (set at runtime)"""
 
 
 # Global variable to hold parsed arguments
@@ -193,7 +196,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         logger.set_level(args.logging_level)
         # Setup environment based on backend type (HackAtari, OCAtari, Gym)
         if args.backend == "HackAtari":
-            from hackatari.core import HackAtari
+            from HackAtari.core import HackAtari
             modifs = [i for i in args.modifs.split(" ") if i]
             env = HackAtari(
                 env_id,
@@ -265,11 +268,6 @@ def make_env(env_id, idx, capture_video, run_dir):
         elif args.masked_wrapper == "masked_dqn_pixel_planes":
             env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
                                                           include_pixels=args.add_pixels)
-        elif args.masked_wrapper == "masked_dl":
-            env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
-                                             include_pixels=args.add_pixels)
-        elif args.masked_wrapper == "masked_dl_grouped":
-            env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
 
         return env
 
@@ -285,6 +283,8 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+
+    assert args.obs_mode != "obj" or args.architecture == "PPO_OBJ", '"obj" observations only work with "PPO_OBJ" architecture!'
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
