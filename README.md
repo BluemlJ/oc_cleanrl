@@ -55,7 +55,7 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 1. **Clone the repository**
 
    ```bash
-   git clone git@github.com:BluemlJ/oc_cleanrl.git --recursive && cd oc_cleanrl
+   git clone git@github.com:BluemlJ/oc_cleanrl.git && cd oc_cleanrl
    ```
 
 2. **Install dependencies**
@@ -71,14 +71,13 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 3. **Enable OCAtari/HackAtari**
 
    ```bash
-   cd submodules/OC_Atari
-   pip install -e .
+   pip install ocatari
    ```
 
 4. **Start a training run**
 
    ```bash
-   python cleanrl/ppo_atari_oc.py --env-id ALE/Pong-v5 --obs_mode obj --architecture PPO_OBJ --backend OCAtari
+   python cleanrl/ppo_atari_occam.py --env-id ALE/Pong-v5 --obs_mode masked_dqn_planes --architecture PPO --backend OCAtari
    ```
 
 ---
@@ -88,15 +87,15 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 You can track the results of training runs using [Weights and Biases](https://wandb.ai/): W&B allows you to visualize key metrics, compare runs across different experiments, and easily share results with collaborators. For instance, you can monitor training progress, analyze model performance, and debug issues more effectively using W&B's interactive dashboards.
 
 ```bash
-python cleanrl/ppo_atari_oc.py \
+python cleanrl/ppo_atari_occam.py \
   --env-id ALE/${game_name}-v5 \
   --backend OCAtari \
-  --obs_mode obj \
-  --architecture PPO_OBJ \
+  --obs_mode masked_dqn_planes \
+  --architecture PPO \
   --track \
   --capture_video \
   --wandb-project-name OCAtari \
-  --exp-name "obj_based_ppo"
+  --exp-name "OCCAM_ppo"
 ```
 
 Additional W&B settings can be adjusted directly in the training scripts.
