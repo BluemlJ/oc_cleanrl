@@ -35,6 +35,8 @@ import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 
+from typing import Literal
+
 import ocatari_wrappers
 
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
@@ -67,11 +69,14 @@ class Args:
     # Environment parameters
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "dqn"
+    obs_mode: Literal[
+        "dqn", "obj", "occam_binary", "occam_objects",
+        "occam_planes", "occam_classes"
+    ] = "dqn"
     """observation mode for OCAtari"""
     buffer_window_size: int = 4
     """length of history in the observations"""
-    backend: str = "HackAtari"
+    backend: Literal["OCAtari", "HackAtari", "Gym"] = "OCAtari"
     """Which Backend should we use"""
     modifs: str = ""
     """Modifications for Hackatari"""
@@ -214,22 +219,16 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = FireResetEnv(env)
 
         # If masked obs_mode are set, apply correct wrapper
-        if args.masked_wrapper == "masked_dqn_bin":
+        if args.masked_wrapper == "occam_binary":
             env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size)
-        elif args.masked_wrapper == "masked_dqn_pixels":
+        elif args.masked_wrapper == "occam_objects":
             env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size)
-        elif args.masked_wrapper == "masked_dqn_grayscale":
+        elif args.masked_wrapper == "occam_classes":
             env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size)
-        elif args.masked_wrapper == "masked_dqn_planes":
+        elif args.masked_wrapper == "occam_planes":
            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size)
-        #elif args.masked_wrapper == "masked_dqn_pixel_planes":
-        #    env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
-        #                                                 include_pixels=args.add_pixels)
-        #elif args.masked_wrapper == "masked_dl":
-        #    env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
-        #                                     include_pixels=args.add_pixels)
-        #elif args.masked_wrapper == "masked_dl_grouped":
-        #    env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
+        elif args.masked_wrapper is not None:
+            raise NotImplementedError(f"OCCAM observation mode {args.masked_wrapper} not supported!")
 
         return env
 
@@ -540,7 +539,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     )
 
     # prepare for masking wrappers
-    if "masked" in args.obs_mode:
+    if "occam" in args.obs_mode:
         import ocatari_wrappers
 
         if args.obs_mode.endswith("+pixels"):

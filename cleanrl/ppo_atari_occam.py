@@ -69,8 +69,8 @@ class Args:
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
     obs_mode: Literal[
-        "dqn", "obj", "masked_dqn_bin", "masked_dqn_pixels",
-        "masked_dqn_planes", "masked_dqn_grayscale", "masked_dqn_pixel_planes"
+        "dqn", "obj", "occam_binary", "occam_objects",
+        "occam_planes", "occam_classes"
     ] = "dqn"
     """observation mode for OCAtari"""
     buffer_window_size: int = 4
@@ -243,18 +243,20 @@ def make_env(env_id, idx, capture_video, run_dir):
             )
 
         # If masked obs_mode are set, apply correct wrapper
-        if args.masked_wrapper == "masked_dqn_bin":
+        if args.masked_wrapper == "occam_binary":
             env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size,
                                                      include_pixels=args.add_pixels)
-        elif args.masked_wrapper == "masked_dqn_pixels":
+        elif args.masked_wrapper == "occam_objects":
             env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size,
                                                     include_pixels=args.add_pixels)
-        elif args.masked_wrapper == "masked_dqn_grayscale":
+        elif args.masked_wrapper == "occam_classes":
             env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size,
                                                          include_pixels=args.add_pixels)
-        elif args.masked_wrapper == "masked_dqn_planes":
+        elif args.masked_wrapper == "occam_planes":
             env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
                                                                include_pixels=args.add_pixels)
+        elif args.masked_wrapper is not None:
+            raise NotImplementedError(f"OCCAM observation mode {args.masked_wrapper} not supported!")
 
         return env
 
@@ -301,7 +303,7 @@ if __name__ == "__main__":
     )
 
     # prepare for masking wrappers
-    if "masked" in args.obs_mode:
+    if "occam" in args.obs_mode:
         if args.obs_mode.endswith("+pixels"):
             args.masked_wrapper = args.obs_mode[:-7]
             args.add_pixels = True
