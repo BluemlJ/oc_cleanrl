@@ -47,7 +47,7 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 ## Getting Started with OC-CleanRL
 
 ### Prerequisites
-- Python >= 3.9, < 3.13
+- Python == 3.9
 - pip
 
 ### Running Experiments Locally
@@ -61,20 +61,10 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 2. **Install dependencies**
 
    ```bash
-   # Core dependencies
-   pip install -r requirements/requirements.txt
-   
-   # Atari-specific dependencies
-   pip install -r requirements/requirements-atari.txt
+   pip install -r requirements.txt
    ```
 
-3. **Enable OCAtari/HackAtari**
-
-   ```bash
-   pip install ocatari
-   ```
-
-4. **Start a training run**
+3. **Start a training run**
 
    ```bash
    python cleanrl/ppo_atari_occam.py --env-id ALE/Pong-v5 --obs_mode masked_dqn_planes --architecture PPO --backend OCAtari
