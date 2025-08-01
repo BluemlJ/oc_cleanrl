@@ -52,19 +52,14 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 
 ### Running Experiments Locally
 
-1. **Clone the repository**
+1. **Install dependencies**
 
    ```bash
-   git clone git@github.com:BluemlJ/oc_cleanrl.git && cd oc_cleanrl
-   ```
-
-2. **Install dependencies**
-
-   ```bash
+   cd oc_cleanrl
    pip install -r requirements.txt
    ```
 
-3. **Start a training run**
+2. **Start a training run**
 
    ```bash
    python cleanrl/ppo_atari_occam.py --env-id ALE/Pong-v5 --obs_mode masked_dqn_planes --architecture PPO --backend OCAtari
