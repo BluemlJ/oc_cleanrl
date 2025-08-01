@@ -62,7 +62,7 @@ We keep this fork up to date with the original CleanRL master branch to enable f
 2. **Start a training run**
 
    ```bash
-   python cleanrl/ppo_atari_occam.py --env-id ALE/Pong-v5 --obs_mode masked_dqn_planes --architecture PPO --backend OCAtari
+   python cleanrl/ppo_atari_occam.py --env-id ALE/Pong-v5 --obs_mode occam_planes --architecture PPO
    ```
 
 ---
@@ -74,13 +74,12 @@ You can track the results of training runs using [Weights and Biases](https://wa
 ```bash
 python cleanrl/ppo_atari_occam.py \
   --env-id ALE/${game_name}-v5 \
-  --backend OCAtari \
-  --obs_mode masked_dqn_planes \
+  --obs_mode occam_planes \
   --architecture PPO \
   --track \
   --capture_video \
-  --wandb-project-name OCAtari \
-  --exp-name "OCCAM_ppo"
+  --wandb-project-name OCCAM \
+  --exp-name "OCCAM_PPO"
 ```
 
 Additional W&B settings can be adjusted directly in the training scripts.
