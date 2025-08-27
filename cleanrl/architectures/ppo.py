@@ -21,13 +21,13 @@ class PPODefault(Predictor):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU()
         )
-        self.flatten = nn.Flatten(),
+        self.flatten = nn.Flatten()
         
         # compute flatten size with a dummy forward
+        # makes the agent applicable for any input image size
         with torch.no_grad():
-            dummy = torch.zeros(1, dims[0], dims[1], dims[2])
-            f = self.features(dummy)
-            feat_dim = f.shape[1] * f.shape[2] * f.shape[3]  # 64*7*28
+            f = self.features(torch.zeros(dims))
+            feat_dim = np.prod(f.shape)
 
         self.mlp = nn.Sequential(
             layer_init(nn.Linear(feat_dim, 512)),
