@@ -1,5 +1,5 @@
 import numpy as np
-
+import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
@@ -13,30 +13,44 @@ class PPODefault(Predictor):
 
         dims = envs.observation_space.shape
 
-        self.network = nn.Sequential(
+        self.features = nn.Sequential(
             layer_init(nn.Conv2d(dims[0], 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            nn.ReLU()
+        )
+        self.flatten = nn.Flatten(),
+        
+        # compute flatten size with a dummy forward
+        with torch.no_grad():
+            dummy = torch.zeros(1, dims[0], dims[1], dims[2])
+            f = self.features(dummy)
+            feat_dim = f.shape[1] * f.shape[2] * f.shape[3]  # 64*7*28
+
+        self.mlp = nn.Sequential(
+            layer_init(nn.Linear(feat_dim, 512)),
             nn.ReLU(),
         )
+        
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
+    def _embed(self, x):
+        x = x.float() / 255.0
+        return self.mlp(self.flatten(self.features(x)))
+    
     def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
+        return self.critic(self._embed(x))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
-        logits = self.actor(hidden)
+        z = self._embed(x)
+        logits = self.actor(z)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+        return action, probs.log_prob(action), probs.entropy(), self.critic(z)
 
 
 class PPObj(Predictor):
