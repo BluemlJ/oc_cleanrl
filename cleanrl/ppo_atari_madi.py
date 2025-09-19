@@ -30,7 +30,7 @@ from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
 from typing import Literal
 
-from cleanrl.architectures.madi import MaskerNet
+from architectures.madi import MaskerNet
 
 # -----------------------
 # Warnings & determinism
@@ -324,8 +324,6 @@ if __name__ == "__main__":
 
     # Run name
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-
-    assert args.obs_mode != "obj" or args.architecture == "PPO_OBJ", '"obj" observations only work with "PPO_OBJ" architecture!'
 
     # W&B init (optional)
     if args.track:
