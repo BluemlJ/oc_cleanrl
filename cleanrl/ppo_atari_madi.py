@@ -361,7 +361,7 @@ if __name__ == "__main__":
     )
 
     # RTPT
-    rtpt = RTPT(name_initials=args.author, experiment_name=f"MaDi_{args.env_id}", max_iterations=args.num_iterations)
+    rtpt = RTPT(name_initials=args.author, experiment_name=f"MaDi", max_iterations=args.num_iterations)
     rtpt.start()
 
     # Device
