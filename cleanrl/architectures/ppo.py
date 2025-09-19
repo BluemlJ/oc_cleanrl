@@ -3,11 +3,11 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
-from .common import Predictor, layer_init
+from .common import Predictor, layer_init, NormalizeImg
 
 
 class PPODefault(Predictor):
-    def __init__(self, envs, device):
+    def __init__(self, envs, device, normalize=True):
         super().__init__()
         self.device = device
 
@@ -21,6 +21,10 @@ class PPODefault(Predictor):
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU()
         )
+
+        if normalize:  # x / 255
+            self.features.insert(0, NormalizeImg())
+
         self.flatten = nn.Flatten()
         
         # compute flatten size with a dummy forward
@@ -38,8 +42,7 @@ class PPODefault(Predictor):
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def _embed(self, x):
-        x = x.float() / 255.0
-        return self.mlp(self.flatten(self.features(x)))
+        return self.mlp(self.flatten(self.features(x.float())))
     
     def get_value(self, x):
         return self.critic(self._embed(x))
