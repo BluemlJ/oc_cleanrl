@@ -355,7 +355,7 @@ if __name__ == "__main__":
             dir=wb_dir,
             job_type="train",
             group=f"{args.env_id}_{args.architecture}",
-            tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
+            tags=[args.env_id, args.architecture, args.backend, args.obs_mode, "MaDi"],
             resume="allow",
         )
         wandb.define_metric("global_step")
@@ -635,17 +635,34 @@ if __name__ == "__main__":
     torch.save(model_data, model_path)
     logger.info(f"model saved to {model_path} at final")
 
+    masker_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
+    masker_data = {"model_weights": masker.state_dict(), "args": vars(args)}
+    torch.save(masker_data, masker_path)
+    logger.info(f"masker saved to {masker_path} at final")
+
     if args.track:
         import wandb
         _log_model_artifact(run, model_path, name=f"{args.exp_name}",
                             iteration=None, metadata={"final": True})
 
+        _log_model_artifact(run, masker_path, name=f"{args.exp_name}_masker",
+                            iteration=None, metadata={"final": True})
+
         # Evaluate agent's performance
+        class EvalAgent(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.masker = masker
+                self.agent = agent
+
+            def get_action_and_value(self, x):
+                return self.agent.get_action_and_value(self.masker(x))
+
         args.new_rf = ""
         rewards = evaluate(
-            agent, make_env, 10,
+            EvalAgent(), make_env, 10,
             env_id=args.env_id, capture_video=args.capture_video,
-            run_dir=writer_dir, device=device
+            run_dir=writer_dir, device=device, seed=args.seed
         )
         wandb.summary["FinalReward_mean"] = float(np.mean(rewards))
         wandb.summary["FinalReward_median"] = float(np.median(rewards))
