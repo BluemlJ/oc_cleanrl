@@ -7,7 +7,7 @@ from .common import Predictor, layer_init, NormalizeImg
 
 
 class PPODefault(Predictor):
-    def __init__(self, envs, device, normalize=True):
+    def __init__(self, envs, device, normalize=False):
         super().__init__()
         self.device = device
 
