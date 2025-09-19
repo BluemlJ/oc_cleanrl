@@ -157,9 +157,9 @@ class Args:
     """ViT patch size"""
 
     # PPObj network parameters
-    encoder_dims: list[int] = (256, 512, 1024, 512)
+    encoder_dims: tuple[int, ...] = (256, 512, 1024, 512)
     """layer dimensions before nn.Flatten()"""
-    decoder_dims: list[int] = (512,)
+    decoder_dims: tuple[int, ...] = (512,)
     """layer dimensions after nn.Flatten()"""
 
     # HackAtari testing
