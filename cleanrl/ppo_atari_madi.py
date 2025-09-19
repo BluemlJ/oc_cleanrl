@@ -103,7 +103,7 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author: str = "JD"
+    author: str = "CD"
     """Initials of the author"""
     checkpoint_interval: int = 40
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
@@ -361,7 +361,7 @@ if __name__ == "__main__":
     )
 
     # RTPT
-    rtpt = RTPT(name_initials=args.author, experiment_name='OCALM', max_iterations=args.num_iterations)
+    rtpt = RTPT(name_initials=args.author, experiment_name=f"MaDi_{args.env_id}", max_iterations=args.num_iterations)
     rtpt.start()
 
     # Device
