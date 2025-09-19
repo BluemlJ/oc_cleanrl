@@ -426,20 +426,20 @@ if __name__ == "__main__":
         count = 0
 
         # Checkpoint
-        if iteration % args.checkpoint_interval == 0:
-            model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
-            model_data = {
-                "model_weights": agent.state_dict(),
-                "args": vars(args),
-                "Timesteps": iteration * args.batch_size
-            }
-            torch.save(model_data, model_path)
-            logger.info(f"model saved to {model_path} at iteration {iteration}")
-            if args.track:
-                _log_model_artifact(
-                    run, model_path, name=f"{args.exp_name}",
-                    iteration=iteration, metadata={"env": args.env_id, "seed": args.seed}
-                )
+        # if iteration % args.checkpoint_interval == 0:
+        #     model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
+        #     model_data = {
+        #         "model_weights": agent.state_dict(),
+        #         "args": vars(args),
+        #         "Timesteps": iteration * args.batch_size
+        #     }
+        #     torch.save(model_data, model_path)
+        #     logger.info(f"model saved to {model_path} at iteration {iteration}")
+        #     if args.track:
+        #         _log_model_artifact(
+        #             run, model_path, name=f"{args.exp_name}",
+        #             iteration=iteration, metadata={"env": args.env_id, "seed": args.seed}
+        #         )
 
         # Rollout
         for step in range(args.num_steps):
