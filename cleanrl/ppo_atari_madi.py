@@ -30,8 +30,6 @@ from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
 from typing import Literal
 
-import ocatari_wrappers
-
 from cleanrl.architectures.madi import MaskerNet
 
 # -----------------------
@@ -283,17 +281,6 @@ def make_env(env_id, idx, seed, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-
-        # Imperfect detection wrappers (optional)
-        if (args.detection_failure_probability > 0
-                or args.mislabeling_probability > 0
-                or args.noise_std > 0):
-            env = ocatari_wrappers.ImperfectDetectionWrapper(
-                env,
-                args.detection_failure_probability,
-                args.mislabeling_probability,
-                args.noise_std
-            )
 
         # Seed env + spaces via Gymnasium API
         try:
