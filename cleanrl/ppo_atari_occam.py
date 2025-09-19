@@ -31,8 +31,6 @@ from stable_baselines3.common.utils import set_random_seed
 
 from typing import Literal
 
-import ocatari_wrappers
-
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -186,7 +184,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         logger.set_level(args.logging_level)
         # Setup environment based on backend type (HackAtari, OCAtari, Gym)
         if args.backend == "HackAtari":
-            from HackAtari.core import HackAtari
+            from hackatari.core import HackAtari
             modifs = [i for i in args.modifs.split(" ") if i]
             env = HackAtari(
                 env_id,
@@ -234,6 +232,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         if (args.detection_failure_probability > 0
                 or args.mislabeling_probability > 0
                 or args.noise_std > 0):
+            import ocatari_wrappers
 
             env = ocatari_wrappers.ImperfectDetectionWrapper(
                 env,
@@ -302,6 +301,7 @@ if __name__ == "__main__":
 
     # prepare for masking wrappers
     if "masked" in args.obs_mode:
+        import ocatari_wrappers
         if args.obs_mode.endswith("+pixels"):
             args.masked_wrapper = args.obs_mode[:-7]
             args.add_pixels = True

@@ -30,6 +30,7 @@ from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
 from typing import Literal
 
+from architectures.ppo import PPODefault as Agent
 from architectures.madi import MaskerNet
 
 # -----------------------
@@ -63,7 +64,7 @@ from generic_eval import evaluate  # noqa
 @dataclass
 class Args:
     # General
-    exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    exp_name: str = "MaDi"
     """the name of this experiment"""
     seed: int = 42
     """seed of the experiment"""
@@ -91,7 +92,7 @@ class Args:
     # Tracking
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "OCCAM"
+    wandb_project_name: str = "MaskedDQN"
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
@@ -109,7 +110,7 @@ class Args:
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
-    architecture: str = "PPO"
+    architecture: str = "MaDi"
     """the architecture to use"""
 
     total_timesteps: int = 10_000_000
@@ -160,7 +161,7 @@ class Args:
     """learning rate for the masking network"""
     masker_beta: float = 0.9
     """beta for the masking network adam optimizer"""
-    masker_num_layers: int = 2
+    masker_num_layers: int = 3
     """number of layers for the MaDi masker"""
     masker_num_filters: int = 32
     """number of filters for the MaDi masker"""
@@ -340,7 +341,7 @@ if __name__ == "__main__":
             dir=wb_dir,
             job_type="train",
             group=f"{args.env_id}_{args.architecture}",
-            tags=[args.env_id, args.architecture, args.backend, args.obs_mode, "MaDi"],
+            tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
             resume="allow",
         )
         wandb.define_metric("global_step")
@@ -361,7 +362,7 @@ if __name__ == "__main__":
     )
 
     # RTPT
-    rtpt = RTPT(name_initials=args.author, experiment_name=f"MaDi", max_iterations=args.num_iterations)
+    rtpt = RTPT(name_initials=args.author, experiment_name=args.exp_name, max_iterations=args.num_iterations)
     rtpt.start()
 
     # Device
@@ -376,16 +377,15 @@ if __name__ == "__main__":
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
 
     # Agent
-    if args.architecture == "PPO":
-        from architectures.ppo import PPODefault as Agent
+    if args.architecture == "MaDi":
         agent = Agent(envs, device, normalize=False).to(device)
+
+        masker = MaskerNet(obs_shape=envs.observation_space.shape, num_layers=args.masker_num_layers,
+                       num_filters=args.masker_num_filters).to(device)
     else:
         raise NotImplementedError(f"Architecture {args.architecture} does not exist!")
 
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
-    masker = MaskerNet(obs_shape=envs.observation_space.shape, num_layers=args.masker_num_layers,
-                       num_filters=args.masker_num_filters).to(device)
     masker_optimizer = torch.optim.Adam(masker.parameters(), lr=args.masker_lr, betas=(args.masker_beta, 0.999))
 
     if args.track:
