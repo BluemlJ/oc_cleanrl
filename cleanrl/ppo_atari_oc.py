@@ -392,7 +392,7 @@ if __name__ == "__main__":
     )
 
     # RTPT
-    rtpt = RTPT(name_initials=args.author, experiment_name='OCALM', max_iterations=args.num_iterations)
+    rtpt = RTPT(name_initials=args.author, experiment_name=args.exp_name, max_iterations=args.num_iterations)
     rtpt.start()
 
     # Device

@@ -10,13 +10,18 @@ import numpy as np
 
 from tqdm import tqdm
 from rtpt import RTPT
+from pathlib import Path
 from dataclasses import dataclass
 
 import gymnasium as gym
 from gymnasium import logger
 
+# Set CUDA environment variable for determinism
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import torch
 import torch.nn as nn
+from torch.nn import TransformerEncoderLayer, TransformerEncoder
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
@@ -27,7 +32,7 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
     NoopResetEnv,
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.utils import set_random_seed
 
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 
@@ -35,8 +40,12 @@ if oc_atari_dir is not None:
     a = os.path.join(os.path.dirname(os.path.abspath(__file__)), oc_atari_dir)
     sys.path.insert(1, a)
 
-from ocrltransformer.wrappers import OCWrapper
-from torch.nn import TransformerEncoderLayer, TransformerEncoder
+# Add the evaluation directory to the Python path to import custom evaluation functions
+eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
+sys.path.insert(1, eval_dir)
+from generic_eval import evaluate  # noqa
+
+from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -48,7 +57,7 @@ class Args:
     # General
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 42
+    seed: int = np.random.randint(np.iinfo(int).max)
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -58,12 +67,8 @@ class Args:
     # Environment
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
-    obs_mode: str = "obj"
+    obs_mode: str = "ori"
     """observation mode for OCAtari"""
-    feature_func: str = "xywh"
-    """the object features to use as observations"""
-    buffer_window_size: int = 4
-    """length of history in the observations"""
     backend: int = 0
     """Which Backend should we use: 0 - OCATARI, 1 - OCALLM, 2 - HACKATARI"""
     modifs: str = ""
@@ -78,9 +83,9 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "OCRL_Transformer"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
-    wandb_dir: str = None
+    wandb_dir: str = "../../wandb"
     """the wandb directory"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -128,8 +133,24 @@ class Args:
     """input embedding size of the transformer"""
     num_heads: int = 8
     """number of multi-attention heads"""
-    num_blocks: int = 4
+    num_blocks: int = 3
     """number of transformer blocks"""
+    pooling_type: str = "max"
+    """the type of the pooling layer"""
+    num_post_layers: int = 1
+    """number of layers after transformer"""
+    masking: bool = True
+    """masking away padding objects for batching purpose"""
+    dropout: float = 0.1
+    """dropout probability in the transformer layers"""
+
+    # Wrapper
+    player_name: str = "Player"
+    """the name of the player category"""
+    use_polar_coordinates: bool = False
+    """use egocentric polar coordinates instead of cartesian coordinates"""
+    relative_velocity: bool = True
+    """use relative velocity as well"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -140,7 +161,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
+def make_env(env_id, idx, capture_video, run_dir):
     def thunk():
         logger.set_level(args.logging_level)
         if args.backend == 2:
@@ -161,9 +182,7 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
             from ocatari.core import OCAtari
             env = OCAtari(
                 env_id, mode="ram", hud=False, render_mode="rgb_array",
-                render_oc_overlay=False, obs_mode=args.obs_mode,
-                # logger=logger, feature_func=feature_func,
-                # buffer_window_size=window_size
+                render_oc_overlay=False, obs_mode=args.obs_mode
             )
         else:
             raise ValueError("Unknown Backend")
@@ -178,7 +197,9 @@ def make_env(env_id, idx, capture_video, run_dir, feature_func, window_size):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = OCWrapper(env)
+        env = OCWrapper(env, args.player_name, include_type=True,
+                        use_polar_coordinates=args.use_polar_coordinates,
+                        relative_velocity=args.relative_velocity)
 
         return env
 
@@ -192,29 +213,59 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class PPOAgent(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, device):
+    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_obj, device):
         super().__init__()
 
         self.device = device
-        dims = envs.observation_space.feature_space.shape
+        dims = envs.observation_space.shape
+        self.num_obj = num_obj
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
-                                                dropout=0.1, batch_first=True)
+                                                dropout=args.dropout, batch_first=True)
+        if masking:
+            self.forward = self.mask
+            if args.pooling_type == 'max':
+                self.pooling = lambda x, mask: torch.max(x * mask.unsqueeze(-1), dim=1)[0]
+            elif args.pooling_type == 'mean':
+                self.pooling = lambda x, mask: torch.sum(x, dim=1) / torch.sum(mask, dim=1, keepdim=True)
+            elif args.pooling_type == 'first':
+                self.pooling = lambda x, mask: x[:, 0, :]
+            else:
+                raise NotImplementedError
+        else:
+            if args.pooling_type == 'max':
+                self.forward = lambda x: torch.max(self.transformer(self.encoder(x)), dim=1)[0]
+            elif args.pooling_type == 'mean':
+                self.forward = lambda x: torch.mean(self.transformer(self.encoder(x)), dim=1)
+            elif args.pooling_type == 'first':
+                self.forward = lambda x: self.transformer(self.encoder(x))[:, 0, :]
+            else:
+                raise NotImplementedError
 
-        self.network = nn.Sequential(
-            nn.Linear(dims[1], emb_dim, device=device),
-            TransformerEncoder(encoder_layer, num_blocks),
-            nn.Flatten(),
-        )
-        self.actor = layer_init(nn.Linear(dims[0] * emb_dim, envs.action_space.n, device=device), std=0.01)
-        self.critic = layer_init(nn.Linear(dims[0] * emb_dim, 1, device=device), std=1)
+
+        self.encoder = nn.Linear(dims[1], emb_dim, device=device)
+        self.transformer = TransformerEncoder(encoder_layer, num_blocks)
+        self.network = nn.Sequential()
+        for _ in range(args.num_post_layers):
+            self.network.append(nn.Linear(emb_dim, emb_dim, device=device))
+            self.network.append(nn.ReLU())
+        self.actor = layer_init(nn.Linear(emb_dim, envs.action_space.n, device=device), std=0.01)
+        self.critic = layer_init(nn.Linear(emb_dim, 1, device=device), std=1)
+
+
+    def mask(self, x):
+        mask = x[..., :self.num_obj].sum(dim=-1, dtype=bool)
+
+        x = self.network(self.transformer(self.encoder(x), src_key_padding_mask=~mask))
+        return self.pooling(x, mask)
+
 
     def get_value(self, x):
-        return self.critic(self.network(x))
+        return self.critic(self.forward(x))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x)
+        hidden = self.forward(x)
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
@@ -223,7 +274,7 @@ class PPOAgent(nn.Module):
 
     def predict(self, x, states=None, **_):
         with torch.no_grad():
-            return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
+            return np.argmax(self.actor(self.forward(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
 
 
 if __name__ == "__main__":
@@ -249,7 +300,7 @@ if __name__ == "__main__":
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"{args.wandb_dir}/{run_name}"
+        writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
 
     writer = SummaryWriter(writer_dir)
@@ -260,7 +311,7 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials='CD', experiment_name='OCRLAtari',
+    rtpt = RTPT(name_initials='CD', experiment_name='OCTransformer',
                 max_iterations=args.num_iterations)
 
     # Start the RTPT tracking
@@ -268,29 +319,34 @@ if __name__ == "__main__":
 
     logger.set_level(args.logging_level)
 
-    # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
     # env setup
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.capture_video, writer_dir, args.feature_func, args.buffer_window_size) for i in range(0, args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0, args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
 
+    # TRY NOT TO MODIFY: seeding
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
+    torch.use_deterministic_algorithms(args.torch_deterministic)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.backends.cudnn.benchmark = not args.torch_deterministic
+    torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    set_random_seed(args.seed, args.cuda)
     envs.seed(args.seed)
+    envs.action_space.seed(args.seed)
+
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, device)
+    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_obj", 0)[0], device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.feature_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -368,7 +424,7 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.observation_space.feature_space.shape)
+        b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.action_space.shape)
         b_advantages = advantages.reshape(-1)
@@ -464,8 +520,12 @@ if __name__ == "__main__":
 
     if args.track:
         # final performance
-        mean, std = evaluate_policy(model=agent, env=envs)  # type: ignore
-        wandb.log({"FinalReward": mean})
+        rewards = evaluate(agent, make_env, 10,
+                           env_id=args.env_id,
+                           capture_video=args.capture_video,
+                           run_dir=writer_dir,
+                           device=device)
+        wandb.log({"FinalReward": np.mean(rewards)})
 
         # model
         name = f"{args.exp_name}_s{args.seed}_{args.emb_dim}_{args.num_blocks}_{args.num_heads}"

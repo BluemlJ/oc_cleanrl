@@ -311,7 +311,7 @@ if __name__ == "__main__":
         args.obs_mode = "ori"
 
     # Create RTPT object to monitor progress with estimated time remaining
-    rtpt = RTPT(name_initials=args.author, experiment_name='OCALM',
+    rtpt = RTPT(name_initials=args.author, experiment_name=args.exp_name,
                 max_iterations=args.num_iterations)
     rtpt.start()  # Start RTPT tracking
 
