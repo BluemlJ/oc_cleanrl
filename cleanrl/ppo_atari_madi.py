@@ -415,7 +415,7 @@ if __name__ == "__main__":
         enewr = 0.0
         count = 0
 
-        Checkpoint
+        # Checkpoint
         if iteration % args.checkpoint_interval == 0:
             model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
             model_data = {
