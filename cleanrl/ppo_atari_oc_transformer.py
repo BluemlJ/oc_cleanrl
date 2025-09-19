@@ -322,7 +322,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     logger.debug(f"Using device {device}.")
 
-    # env setup
+    # Environment setup
     envs = SubprocVecEnv(
         [make_env(args.env_id, i, args.capture_video, writer_dir) for i in range(0, args.num_envs)]
     )
@@ -340,12 +340,10 @@ if __name__ == "__main__":
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
 
-    # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
     agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_obj", 0)[0], device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # ALGO Logic: Storage setup
+    # Allocate storage for observations, actions, rewards, etc.
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -353,16 +351,16 @@ if __name__ == "__main__":
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
-    # TRY NOT TO MODIFY: start the game
+    # Start training loop
     global_step = 0
     start_time = time.time()
     next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    # Iterate through training iterations with progress bar
     pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
-    for iteration in pbar:
-        # Annealing the rate if instructed to do so.
+    for iteration in pbar:  # Anneal learning rate if specified
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
@@ -379,19 +377,19 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            # ALGO LOGIC: action logic
+            # Get action and value from agent
             with torch.no_grad():
                 action, logprob, _, value = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
-            # TRY NOT TO MODIFY: execute the game and log data.
+            # Execute the game and store reward, next observation, and done flag
             next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
-            # next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
+            # Track episode-level statistics if a game is done
             if 1 in next_done:
                 for info in infos:
                     if "episode" in info:
@@ -403,11 +401,8 @@ if __name__ == "__main__":
                         else:
                             eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
-                        # writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
-                        # writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
-                        # writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-        # bootstrap value if not done
+        # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
@@ -423,7 +418,7 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
-        # flatten the batch
+        # Flatten the batch for optimization
         b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.action_space.shape)
@@ -431,7 +426,7 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # Optimizing the policy and value network
+        # Optimize the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
@@ -445,13 +440,14 @@ if __name__ == "__main__":
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                    # Calculate approximate KL divergence
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
+                    # Normalize advantages
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
@@ -474,9 +470,11 @@ if __name__ == "__main__":
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
+                # Entropy loss (for exploration)
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
+                # Backpropagation and optimizer step
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -485,11 +483,12 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
+        # Compute explained variance (diagnostic measure for value function fit quality)
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # Log episode statistics for Tensorboard
         if done_in_episode:
             if args.backend == 1 or (args.backend == 2 and args.new_rf):
                 writer.add_scalar("charts/Episodic_NewRF", enewr / count, global_step)
@@ -497,6 +496,7 @@ if __name__ == "__main__":
             writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
+        # Log other statistics
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
@@ -507,10 +507,11 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        # Update RTPT
+        # Update RTPT for progress tracking
         rtpt.step()
 
-    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
+    # Save the trained model to disk
+    model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
     model_data = {
         "model_weights": agent.state_dict(),
         "args": vars(args),
@@ -518,6 +519,7 @@ if __name__ == "__main__":
     torch.save(model_data, model_path)
     logger.info(f"model saved to {model_path} in epoch {epoch}")
 
+    # Log final model and performance with Weights and Biases if enabled
     if args.track:
         # final performance
         rewards = evaluate(agent, make_env, 10,
@@ -540,5 +542,6 @@ if __name__ == "__main__":
 
         wandb.finish()
 
+    # Close environments and writer after training is complete
     envs.close()
     writer.close()

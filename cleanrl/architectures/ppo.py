@@ -7,7 +7,7 @@ from .common import Predictor, layer_init, NormalizeImg
 
 
 class PPODefault(Predictor):
-    def __init__(self, envs, device, normalize=False):
+    def __init__(self, envs, device, normalize=True):
         super().__init__()
         self.device = device
 
@@ -25,30 +25,25 @@ class PPODefault(Predictor):
         if normalize:  # x / 255
             self.features.insert(0, NormalizeImg())
 
-        self.flatten = nn.Flatten()
+        self.features.append(nn.Flatten())
         
         # compute flatten size with a dummy forward
         # makes the agent applicable for any input image size
         with torch.no_grad():
             f = self.features(torch.zeros(dims))
-            feat_dim = np.prod(f.shape)
+            feat_dim = f.flatten().shape[0]
 
-        self.mlp = nn.Sequential(
-            layer_init(nn.Linear(feat_dim, 512)),
-            nn.ReLU(),
-        )
+        self.features.append(layer_init(nn.Linear(feat_dim, 512)))
+        self.features.append(nn.ReLU())
         
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
-
-    def _embed(self, x):
-        return self.mlp(self.flatten(self.features(x.float())))
     
     def get_value(self, x):
-        return self.critic(self._embed(x))
+        return self.critic(self.features(x))
 
     def get_action_and_value(self, x, action=None):
-        z = self._embed(x)
+        z = self.features(x)
         logits = self.actor(z)
         probs = Categorical(logits=logits)
         if action is None:

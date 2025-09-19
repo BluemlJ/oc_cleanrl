@@ -310,16 +310,6 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
 
-    # Prepare masking wrapper flags
-    if "masked" in args.obs_mode:
-        if args.obs_mode.endswith("+pixels"):
-            args.masked_wrapper = args.obs_mode[:-7]
-            args.add_pixels = True
-        else:
-            args.masked_wrapper = args.obs_mode
-            args.add_pixels = False
-        args.obs_mode = "ori"
-
     # Global seeding
     seed_everything(args.seed, cuda=args.cuda, torch_deterministic=args.torch_deterministic)
 
@@ -425,21 +415,21 @@ if __name__ == "__main__":
         enewr = 0.0
         count = 0
 
-        # Checkpoint
-        # if iteration % args.checkpoint_interval == 0:
-        #     model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
-        #     model_data = {
-        #         "model_weights": agent.state_dict(),
-        #         "args": vars(args),
-        #         "Timesteps": iteration * args.batch_size
-        #     }
-        #     torch.save(model_data, model_path)
-        #     logger.info(f"model saved to {model_path} at iteration {iteration}")
-        #     if args.track:
-        #         _log_model_artifact(
-        #             run, model_path, name=f"{args.exp_name}",
-        #             iteration=iteration, metadata={"env": args.env_id, "seed": args.seed}
-        #         )
+        Checkpoint
+        if iteration % args.checkpoint_interval == 0:
+            model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
+            model_data = {
+                "model_weights": agent.state_dict(),
+                "args": vars(args),
+                "Timesteps": iteration * args.batch_size
+            }
+            torch.save(model_data, model_path)
+            logger.info(f"model saved to {model_path} at iteration {iteration}")
+            if args.track:
+                _log_model_artifact(
+                    run, model_path, name=f"{args.exp_name}",
+                    iteration=iteration, metadata={"env": args.env_id, "seed": args.seed}
+                )
 
         # Rollout
         for step in range(args.num_steps):
