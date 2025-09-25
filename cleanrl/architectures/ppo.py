@@ -1,37 +1,49 @@
 import numpy as np
-
+import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
-from .common import Predictor, layer_init
+from common import Predictor, layer_init, NormalizeImg
 
 
 class PPODefault(Predictor):
-    def __init__(self, envs, device):
+    def __init__(self, envs, device, normalize=True):
         super().__init__()
         self.device = device
 
         dims = envs.observation_space.shape
 
-        self.network = nn.Sequential(
+        self.features = nn.Sequential(
             layer_init(nn.Conv2d(dims[0], 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
             layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
+            nn.ReLU()
         )
+
+        if normalize:  # x / 255
+            self.features.insert(0, NormalizeImg())
+
+        self.features.append(nn.Flatten())
+
+        # compute flatten size with a dummy forward
+        # makes the agent applicable for any input image size
+        with torch.no_grad():
+            f = self.features(torch.zeros(dims))
+            feat_dim = f.flatten().shape[0]
+
+        self.features.append(layer_init(nn.Linear(feat_dim, 512)))
+        self.features.append(nn.ReLU())
+
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def get_value(self, x):
-        return self.critic(self.network(x / 255.0))
+        return self.critic(self.features(x))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
+        hidden = self.features(x)
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:

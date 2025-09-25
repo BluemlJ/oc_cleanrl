@@ -14,3 +14,9 @@ class Predictor(nn.Module):
     def predict(self, x, states=None, **_):
         with torch.no_grad():
             return np.argmax(self.actor(self.network(torch.Tensor(x).to(self.device))).cpu().numpy(), axis=1), states
+
+
+class NormalizeImg(nn.Module):
+    @staticmethod
+    def forward(x):
+        return x / 255.

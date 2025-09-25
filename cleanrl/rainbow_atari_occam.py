@@ -37,10 +37,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from typing import Literal
 
-import ocatari_wrappers
-
-from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.utils import set_random_seed
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
