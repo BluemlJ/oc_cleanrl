@@ -610,7 +610,7 @@ if __name__ == "__main__":
     torch.save(model_data, model_path)
     logger.info(f"model saved to {model_path} at final")
 
-    masker_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
+    masker_path = f"{writer_dir}/{args.exp_name}_masker_final.cleanrl_model"
     masker_data = {"model_weights": masker.state_dict(), "args": vars(args)}
     torch.save(masker_data, masker_path)
     logger.info(f"masker saved to {masker_path} at final")
