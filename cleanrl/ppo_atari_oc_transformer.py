@@ -13,6 +13,8 @@ from rtpt import RTPT
 from pathlib import Path
 from dataclasses import dataclass
 
+from typing import Literal
+
 import gymnasium as gym
 from gymnasium import logger
 
@@ -143,6 +145,8 @@ class Args:
     """masking away padding objects for batching purpose"""
     dropout: float = 0.1
     """dropout probability in the transformer layers"""
+    type_embedding: Literal[None, "additive", "one_hot"] = "one_hot"
+    """how the type is embedded into the object vector"""
 
     # Wrapper
     player_name: str = "Player"
@@ -197,7 +201,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = OCWrapper(env, args.player_name, include_type=True,
+        env = OCWrapper(env, args.player_name, type_embedding=args.type_embedding,
                         use_polar_coordinates=args.use_polar_coordinates,
                         relative_velocity=args.relative_velocity)
 
