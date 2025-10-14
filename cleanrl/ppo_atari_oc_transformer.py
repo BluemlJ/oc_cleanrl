@@ -47,6 +47,8 @@ eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
 from generic_eval import evaluate  # noqa
 
+from architectures.common import layer_init
+
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 
 
@@ -95,6 +97,8 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
+    author : str = "CD"
+    """Initials of the author"""
 
     # Algorithm specific arguments
     total_timesteps: int = 10_000_000
@@ -145,8 +149,6 @@ class Args:
     """masking away padding objects for batching purpose"""
     dropout: float = 0.1
     """dropout probability in the transformer layers"""
-    type_embedding: Literal[None, "additive", "one_hot"] = "one_hot"
-    """how the type is embedded into the object vector"""
 
     # Wrapper
     player_name: str = "Player"
@@ -155,6 +157,10 @@ class Args:
     """use egocentric polar coordinates instead of cartesian coordinates"""
     relative_velocity: bool = True
     """use relative velocity as well"""
+    type_embedding: Literal[None, "additive", "one_hot"] = "one_hot"
+    """how the type is embedded into the object vector"""
+    include_wh: bool = False
+    """use width and height of the objects in addition to position and velocity"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -203,25 +209,21 @@ def make_env(env_id, idx, capture_video, run_dir):
             env = FireResetEnv(env)
         env = OCWrapper(env, args.player_name, type_embedding=args.type_embedding,
                         use_polar_coordinates=args.use_polar_coordinates,
-                        relative_velocity=args.relative_velocity)
+                        relative_velocity=args.relative_velocity,
+                        include_wh=args.include_wh)
 
         return env
 
     return thunk
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
 class PPOAgent(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_obj, device):
+    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_object_types, device):
         super().__init__()
 
         self.device = device
         dims = envs.observation_space.shape
-        self.num_obj = num_obj
+        self.num_object_types = num_object_types
 
         encoder_layer = TransformerEncoderLayer(emb_dim, num_heads,
                                                 emb_dim, device=device,
@@ -258,7 +260,7 @@ class PPOAgent(nn.Module):
 
 
     def mask(self, x):
-        mask = x[..., :self.num_obj].sum(dim=-1, dtype=bool)
+        mask = x[..., :self.num_object_types].sum(dim=-1, dtype=bool)
 
         x = self.network(self.transformer(self.encoder(x), src_key_padding_mask=~mask))
         return self.pooling(x, mask)
@@ -314,11 +316,8 @@ if __name__ == "__main__":
     )
 
     # Create RTPT object
-    rtpt = RTPT(name_initials='CD', experiment_name='OCTransformer',
+    rtpt = RTPT(name_initials=args.author, experiment_name=f'ORBiT_{args.env_id.split("ALE/")[-1].split("-v")[0]}',
                 max_iterations=args.num_iterations)
-
-    # Start the RTPT tracking
-    rtpt.start()
 
     logger.set_level(args.logging_level)
 
@@ -345,7 +344,7 @@ if __name__ == "__main__":
 
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_obj", 0)[0], device)
+    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_object_types", 0)[0], device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -362,6 +361,9 @@ if __name__ == "__main__":
     next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+
+    # Start the RTPT tracking
+    rtpt.start()
 
     pbar = tqdm(range(1, args.num_iterations + 1), postfix=postfix)
     for iteration in pbar:
@@ -406,9 +408,6 @@ if __name__ == "__main__":
                         else:
                             eorgr += info["episode"]["r"]
                         elength += info["episode"]["l"]
-                        # writer.add_scalar("charts/episodic_return_new_rf", info["episode"]["r"], global_step)
-                        # writer.add_scalar("charts/episodic_return_original_rf", info["org_reward"], global_step)
-                        # writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
         # bootstrap value if not done
         with torch.no_grad():
