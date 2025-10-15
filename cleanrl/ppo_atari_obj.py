@@ -138,16 +138,6 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-    # Transformer parameters
-    emb_dim: int = 128
-    """input embedding size of the transformer"""
-    num_heads: int = 64
-    """number of multi-attention heads"""
-    num_blocks: int = 1
-    """number of transformer blocks"""
-    patch_size: int = 12
-    """ViT patch size"""
-
     # PPObj network parameters
     encoder_dims: list[int] = (256, 512, 1024, 512)
     """layer dimensions before nn.Flatten()"""
@@ -165,7 +155,7 @@ class Args:
     """use egocentric polar coordinates instead of cartesian coordinates"""
     relative_velocity: bool = True
     """use relative velocity as well"""
-    type_embedding = "one_hot"
+    type_embedding: str = "one_hot"
     """how the type is embedded into the object vector"""
     include_wh: bool = False
     """use width and height of the objects in addition to position and velocity"""
@@ -178,7 +168,7 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
     masked_wrapper: str = "obj_dx"
-    """the obs_mode if a masking wrapper is needed (set in runtime)"""
+    """the obs_mode if a masking wrapper is needed"""
 
 
 # Global variable to hold parsed arguments
