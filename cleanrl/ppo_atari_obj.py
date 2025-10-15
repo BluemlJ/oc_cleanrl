@@ -82,9 +82,9 @@ class Args:
     """the frame skipping option of the environment"""
 
     # Tracking (Logging and monitoring configurations)
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "OC-Transformer"
+    wandb_project_name: str = "PPObj-v2"
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
