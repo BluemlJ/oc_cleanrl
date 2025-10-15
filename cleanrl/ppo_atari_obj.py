@@ -1,4 +1,6 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
+from typing import Literal
+
 import os
 import sys
 import tyro
@@ -155,7 +157,7 @@ class Args:
     """use egocentric polar coordinates instead of cartesian coordinates"""
     relative_velocity: bool = True
     """use relative velocity as well"""
-    type_embedding: str = "one_hot"
+    type_embedding: Literal[None, "additive", "one_hot"] = "one_hot"
     """how the type is embedded into the object vector"""
     include_wh: bool = False
     """use width and height of the objects in addition to position and velocity"""
