@@ -257,10 +257,10 @@ class MoEAgent(nn.Module):
         if weighted_sum:
             assert dims[-1] % envs.action_space.n == 0
             output_dim = dims[-1] // envs.action_space.n
-            self.get_logits = self.get_weighted_sum
+            self.get_logits = self.do_weighted_sum
         else:
             output_dim = envs.action_space.n
-            self.get_logits = self.get_hidden
+            self.get_logits = self.do_policy
 
         self.network = nn.Sequential(*layers)
         self.actor = layer_init(nn.Linear(in_dim, output_dim), std=0.01)
@@ -269,22 +269,19 @@ class MoEAgent(nn.Module):
     def get_value(self, x):
         return self.critic(self.network(x))
 
-    def get_hidden(self, x):
+    def do_policy(self, x):
         hidden = self.network(x)
-        return self.actor(hidden), hidden   # todo probs not logits
+        return Categorical(logits=self.actor(hidden)), hidden
 
-    def get_weighted_sum(self, x):
-        weights, hidden = self.get_hidden(x)
-        weights /= torch.sum(weights, dim=0)
-        return weights * x, hidden
+    def do_weighted_sum(self, x):
+        weights, hidden = self.do_policy(x)
+        return Categorical(probs=weights.probs * x), hidden
 
     def get_action_and_value(self, x, action=None):
-        logits, hidden = self.get_logits(x)
-        # probs = Categorical(logits=logits)
-        probs = Categorical(probs=logits)
+        categorical, hidden = self.get_logits(x)
         if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+            action = categorical.sample()
+        return action, categorical.log_prob(action), categorical.entropy(), self.critic(hidden)
 
 
 # Global variable to hold parsed arguments
