@@ -235,8 +235,7 @@ class MoEWrapper(ObservationWrapper):
             new_obs = torch.empty(0)
             for key in self.agents:
                 policy = self.agents[key](observation[key])
-                new_obs = torch.cat((new_obs, policy.probs[0]), dim=0)
-                pass
+                new_obs = torch.cat((new_obs, policy.probs[0]))
 
         return new_obs
 
@@ -277,7 +276,7 @@ class MoEAgent(nn.Module):
 
     def do_weighted_sum(self, x):
         weights, hidden = self.do_policy(x)
-        return Categorical(probs=weights.probs * x), hidden
+        return Categorical(probs=weights.probs @ x.reshape(weights.param_shape[1], -1)), hidden
 
     def get_action_and_value(self, x, action=None):
         categorical, hidden = self.get_logits(x)
