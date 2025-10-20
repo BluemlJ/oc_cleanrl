@@ -284,7 +284,6 @@ class MoEAgent(nn.Module):
         probs = Categorical(probs=logits)
         if action is None:
             action = probs.sample()
-            action = torch.argmax(probs.probs, dim=1)
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
@@ -345,7 +344,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=["plane_masks"], work_in_output_shape=True)
+        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=["plane_masks"])
         env = MoEWrapper(env, args.model_dir)
 
         return env
