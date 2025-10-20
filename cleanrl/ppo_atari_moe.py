@@ -157,6 +157,8 @@ class Args:
     # Wrapper
     model_dir: str = ""
     """The model folder"""
+    moe_wrappers: tuple[int, ...] = ("plane_masks",)
+    """The agents/wrappers to use in the MoE model"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -341,7 +343,7 @@ def make_env(env_id, idx, capture_video, run_dir):
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=["plane_masks"])
+        env = ocatari_wrappers.MultiOCCAMWrapper(env, args.moe_wrappers)
         env = MoEWrapper(env, args.model_dir)
 
         return env
