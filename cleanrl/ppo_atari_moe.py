@@ -157,7 +157,7 @@ class Args:
     # Wrapper
     model_dir: str = ""
     """The model folder"""
-    moe_wrappers: tuple[int, ...] = ("plane_masks",)
+    moe_wrappers: tuple[str, ...] = ("plane_masks",)
     """The agents/wrappers to use in the MoE model"""
 
     # to be filled in runtime
