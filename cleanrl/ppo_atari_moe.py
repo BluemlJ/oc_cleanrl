@@ -170,10 +170,22 @@ class Args:
     """the obs_mode if a masking wrapper is needed"""
 
 
-def load_agent(env, model_dir, wrapper, target_device):
+agent_mapping = {
+            "plane_masks": "ppo_occam_planes",
+            "class_masks": "ppo_occam_classes",
+            "binary_masks": "ppo_occam_binary",
+            "object_masks": "ppo_occam_pixels",
+            # "pixel_planes": "ppo_occam_pixel_planes",  # todo
+            # "big_planes": "ppo_occam_parallel_planes",  # todo
+            "dqn": "pixel_ppo",
+            "obj": "obj_ppo_large",
+        }
+
+
+def load_agent(env, model_dir, game_name, wrapper, target_device):
     """Load a saved CleanRL PPO agent for a given OCAtari wrapper."""
     ckpt = torch.load(
-        f"{model_dir}/{wrapper}.cleanrl_model",
+        f"{model_dir}/{game_name}/0/{agent_mapping[wrapper]}.cleanrl_model",
         map_location=target_device,
         weights_only=False,
     )
@@ -255,8 +267,7 @@ class MoEWrapper(ObservationWrapper):
         self.target_hw = downsample_hw
         self.agents = {}
         for wrapper in env.wrappers:  # noqa: should wrap an occam multi wrapper
-            self.agents[wrapper] = load_agent(
-                env.wrappers[wrapper], model_dir, wrapper, self.device)
+            self.agents[wrapper] = load_agent(env.wrappers[wrapper], model_dir, env.unwrapped.game_name, wrapper, self.device)
 
         super().__init__(env)
 
@@ -286,7 +297,7 @@ class MoEWrapper(ObservationWrapper):
 
         total_dim = self.policy_feature_dim + self.raw_obs_dim
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=total_dim, dtype=np.float32,
+            low=0.0, high=1.0, shape=(total_dim,), dtype=np.float32,
         )
 
     def observation(self, observation):
