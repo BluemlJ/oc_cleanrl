@@ -1,11 +1,4 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
-from architectures.common import layer_init, NormalizeImg
-from gymnasium.core import ObsType, WrapperObsType
-from ocatari.utils import _load_checkpoint
-from sympy.physics.units.systems.length_weight_time import dimsys_length_weight_time
-from torch.distributions import Categorical
-from typing import Literal
-
 import os
 import sys
 import tyro
@@ -27,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from torch.distributions import Categorical
 
 from stable_baselines3.common.atari_wrappers import (
     EpisodicLifeEnv,
@@ -35,6 +29,8 @@ from stable_baselines3.common.atari_wrappers import (
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
+
+from architectures.common import layer_init, NormalizeImg
 
 import ocatari_wrappers
 
@@ -55,9 +51,6 @@ if oc_atari_dir is not None:
 eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
 from generic_eval import evaluate  # noqa
-
-
-device = torch.device("cpu")
 
 
 # Command line argument configuration using dataclass
@@ -148,17 +141,19 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-    # PPObj network parameters
-    layer_dims: tuple[int, ...] = (256, 512, 1024, 512)
-    """layer dimensions for MoEAgent"""
-
     # HackAtari testing
     test_modifs: str = ""
     """Modifications for Hackatari"""
 
+    # PPObj network parameters
+    layer_dims: tuple[int, ...] = (256, 512, 1024, 512)
+    """layer dimensions for MoEAgent"""
+
     # Wrapper
     model_dir: str = ""
     """The model folder"""
+    moe_wrappers: tuple[str, ...] = ("plane_masks",)
+    """The agents/wrappers to use in the MoE model"""
     include_raw_obs: bool = True
     """Include raw observations alongside expert policies for the MoE input"""
     raw_obs_downsample: tuple[int, int] = (84, 84)
@@ -192,7 +187,7 @@ def load_agent(env, model_dir, wrapper, target_device):
 class PPOAgent(nn.Module):
     """Convolutional policy used by the individual expert checkpoints."""
 
-    def __init__(self, env, device, normalize=True):
+    def __init__(self, env, device):
         """Initialise the expert network architecture and preprocessing."""
         super().__init__()
 
@@ -276,24 +271,22 @@ class MoEWrapper(ObservationWrapper):
                 dummy_obs = np.zeros(self.raw_obs_shape, dtype=np.float32)
                 encoded = self._encode_raw_observation(dummy_obs)
                 self.raw_obs_dim = encoded.size
+                self.encoded_raw_hw = self.target_hw
+                self._empty_raw_flat = np.zeros(self.raw_obs_dim, dtype=np.float32)
             else:
                 self.raw_obs_shape = ()
                 self.raw_obs_dim = 0
+                self.encoded_raw_hw = None
+                self._empty_raw_flat = None
         else:
             self.raw_obs_shape = ()
             self.raw_obs_dim = 0
-        self.encoded_raw_hw = self.target_hw if self.raw_obs_dim > 0 else None
-        self._empty_raw_flat = (
-            np.zeros(self.raw_obs_dim, dtype=np.float32)
-            if self.raw_obs_dim > 0
-            else None
-        )
+            self.encoded_raw_hw = None
+            self._empty_raw_flat = None
 
         total_dim = self.policy_feature_dim + self.raw_obs_dim
         self.observation_space = gym.spaces.Box(
-            low=np.zeros(total_dim, dtype=np.float32),
-            high=np.ones(total_dim, dtype=np.float32),
-            dtype=np.float32,
+            low=0.0, high=1.0, shape=total_dim, dtype=np.float32,
         )
 
     def observation(self, observation):
@@ -311,22 +304,13 @@ class MoEWrapper(ObservationWrapper):
             # Raw pixels disabled: only feed expert policy probabilities downstream
             return policy_vec
 
-        raw_obs = self._get_raw_observation()
+        raw_obs = self.env.last_raw_observation  # todo why not use the grayscale and downsample directly?
         if raw_obs is None:
             raw_flat = self._empty_raw_flat
         else:
             raw_flat = self._encode_raw_observation(raw_obs)
 
         return np.concatenate((policy_vec, raw_flat), axis=0).astype(np.float32)
-
-    def _get_raw_observation(self):
-        """Walk through the wrapper stack to retrieve the cached raw pixels if available."""
-        inner = self.env
-        while inner is not None:
-            if hasattr(inner, "last_raw_observation"):
-                return inner.last_raw_observation
-            inner = getattr(inner, "env", None)
-        return None
 
     def _encode_raw_observation(self, raw_obs, target_hw=None):
         """
@@ -487,12 +471,12 @@ class MoEAgent(nn.Module):
         """Sample/score actions and obtain entropy+value for PPO optimisation."""
         hidden = self._forward_features(x)
         if self.weighted_sum:
-            probs = self._weighted_distribution(hidden, x)
+            categorical = self._weighted_distribution(hidden, x)
         else:
-            probs = self._direct_distribution(hidden)
+            categorical = self._direct_distribution(hidden)
         if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+            action = categorical.sample()
+        return action, categorical.log_prob(action), categorical.entropy(), self.critic(hidden)
 
 
 # Global variable to hold parsed arguments
@@ -554,8 +538,7 @@ def make_env(env_id, idx, capture_video, run_dir, target_device):
         wrapper_device = torch.device(target_device)
         if args.include_raw_obs:
             env = RawObservationCache(env)
-        env = ocatari_wrappers.MultiOCCAMWrapper(
-            env, wrappers=["plane_masks"], work_in_output_shape=True)
+        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=args.moe_wrappers)
         # Replace observation with concatenated expert policies (and optional pixels)
         env = MoEWrapper(
             env,
