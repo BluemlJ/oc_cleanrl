@@ -155,7 +155,9 @@ class Args:
     moe_wrappers: tuple[str, ...] = ("plane_masks",)
     """The agents/wrappers to use in the MoE model"""
     include_raw_obs: bool = True
-    """Include raw observations alongside expert policies for the MoE input"""
+    """Include raw observations for the MoE input"""
+    include_policies: bool = True
+    """Include expert policies for the MoE input"""
     raw_obs_downsample: tuple[int, int] = (84, 84)
     """Target (height, width) for downsampling raw observations when included"""
 
@@ -372,7 +374,7 @@ class MoEWrapper(ObservationWrapper):
 class MoEAgent(nn.Module):
     """Policy/value network that learns to fuse expert policies (plus optional pixels)."""
 
-    def __init__(self, envs, device, layer_dims=(128, 64), weighted_sum=True):
+    def __init__(self, envs, device, layer_dims=(128, 64), weighted_sum=True, include_policies=True):
         """Build the MoE controller with configurable hidden layers and fusion mode."""
         super().__init__()
         self.device = device
@@ -386,15 +388,23 @@ class MoEAgent(nn.Module):
         self.raw_obs_dim = base_env.get_attr("raw_obs_dim")[0]
         self.encoded_raw_hw = base_env.get_attr("encoded_raw_hw")[0]
 
-        # Branch that reasons over expert policy outputs
-        policy_hidden_dim = layer_dims[0] if len(layer_dims) > 0 else 128
-        self.policy_branch = nn.Sequential(
-            layer_init(nn.Linear(self.policy_feature_dim, policy_hidden_dim)),
-            nn.ReLU(),
-        )
+        self.include_policies = include_policies
+        self.include_pixels = self.raw_obs_dim > 0 and self.encoded_raw_hw is not None
 
-        # Optional branch encoding the low-resolution pixel grid
-        if self.raw_obs_dim > 0 and self.encoded_raw_hw is not None:
+        assert self.include_policies or self.include_pixels
+
+        if include_policies:
+            policy_hidden_dim = layer_dims[0] if len(layer_dims) > 0 else 128
+            # Branch that reasons over expert policy outputs
+            self.policy_branch = nn.Sequential(
+                layer_init(nn.Linear(self.policy_feature_dim, policy_hidden_dim)),
+                nn.ReLU(),
+            )
+        else:
+            policy_hidden_dim = 0
+
+            # Optional branch encoding the low-resolution pixel grid
+        if self.include_pixels:
             raw_h, raw_w = self.encoded_raw_hw
             self.raw_branch = nn.Sequential(
                 layer_init(
@@ -443,19 +453,21 @@ class MoEAgent(nn.Module):
 
     def _forward_features(self, x):
         policy_part = x[:, :self.policy_feature_dim]
-        policy_features = self.policy_branch(policy_part)
 
-        if self.raw_branch is not None and self.raw_project is not None:
+        if self.include_policies:
+            features = self.policy_branch(policy_part)
+        if self.include_pixels:
             raw_part = x[:, self.policy_feature_dim:]
             raw_h, raw_w = self.encoded_raw_hw
             raw_img = raw_part.view(x.size(0), 1, raw_h, raw_w)
             raw_features = self.raw_branch(raw_img)
             raw_features = self.raw_project(raw_features)
-            features = torch.cat((policy_features, raw_features), dim=1)
-        else:
-            features = policy_features
+            if self.include_policies:
+                features = torch.cat((features, raw_features), dim=1)  # noqa: can't be undefined
+            else:
+                features = raw_features
 
-        return self.fusion_network(features)
+        return self.fusion_network(features)  # noqa: only undefined if both False, crashes earlier
 
     def get_value(self, x):
         """Estimate the value function for PPO updates."""
