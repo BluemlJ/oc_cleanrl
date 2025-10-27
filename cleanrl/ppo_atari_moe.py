@@ -99,9 +99,9 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author: str = "CD"
+    author: str = "JB"
     """Initials of the author"""
-    checkpoint_interval: int = 40
+    checkpoint_interval: int = 1_000_000
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
@@ -154,9 +154,9 @@ class Args:
     """The model folder"""
     moe_wrappers: tuple[str, ...] = ("plane_masks",)
     """The agents/wrappers to use in the MoE model"""
-    include_raw_obs: bool = True
+    include_raw_obs: bool = False
     """Include raw observations for the MoE input"""
-    include_policies: bool = True
+    include_policies: bool = False
     """Include expert policies for the MoE input"""
     raw_obs_downsample: tuple[int, int] = (84, 84)
     """Target (height, width) for downsampling raw observations when included"""
@@ -180,14 +180,22 @@ agent_mapping = {
             # "pixel_planes": "ppo_occam_pixel_planes",  # todo
             # "big_planes": "ppo_occam_parallel_planes",  # todo
             "dqn": "pixel_ppo",
-            "obj": "obj_ppo_large",
+            #"obj": "obj_ppo_large",
         }
 
-
+def _sanitize(name: str) -> str:
+    """Turn wrapper name into a safe tag for W&B keys/plots."""
+    return (
+    name.replace("/", "_")
+    .replace(" ", "_")
+    .replace(".", "_")
+    .replace("|", "_")
+    )
+    
 def load_agent(env, model_dir, game_name, wrapper, target_device):
     """Load a saved CleanRL PPO agent for a given OCAtari wrapper."""
     ckpt = torch.load(
-        f"{model_dir}/{game_name}/0/{agent_mapping[wrapper]}.cleanrl_model",
+        f"{model_dir}/{agent_mapping[wrapper]}.cleanrl_model",
         map_location=target_device,
         weights_only=False,
     )
@@ -253,6 +261,32 @@ class RawObservationCache(ObservationWrapper):
         """Store the unmodified observation and return it unchanged."""
         self.last_raw_observation = observation
         return observation
+
+@torch.no_grad()
+def evaluate_expert(model_dir, env_fn, wrapper_key: str, episodes: int, device: torch.device):
+    """
+    Evaluates a single expert (CleanRL PPO checkpoint) on its own OCCAM view.
+    Returns: list of episodic returns (float).
+    """
+    env = env_fn()
+    # load expert for this specific wrapper
+    expert = load_agent(env.wrappers[wrapper_key], model_dir, env.unwrapped.game_name, wrapper_key, device).to(device)
+    returns = []
+    obs, _ = env.reset()
+    ep_ret = 0.0
+    while len(returns) < episodes:
+        # env observation is a Dict[str, np.ndarray] from MultiOCCAMWrapper
+        obs_dict = obs
+        logits = expert(obs_dict[wrapper_key])  # Categorical
+        action = logits.probs.argmax().item()   # greedy eval
+        obs, reward, done, trunc, infos = env.step(action)
+        ep_ret += reward
+        if done or trunc:
+            returns.append(ep_ret)
+            ep_ret = 0.0
+            obs, _ = env.reset()
+    env.close()
+    return returns
 
 
 class MoEWrapper(ObservationWrapper):
@@ -393,6 +427,8 @@ class MoEAgent(nn.Module):
 
         assert self.include_policies or self.include_pixels
 
+        self.wrapper_names = list(args.moe_wrappers)
+        
         if include_policies:
             policy_hidden_dim = layer_dims[0] if len(layer_dims) > 0 else 128
             # Branch that reasons over expert policy outputs
@@ -490,6 +526,17 @@ class MoEAgent(nn.Module):
         mixed_probs = mixed_probs / mixed_probs.sum(dim=1, keepdim=True)
         return Categorical(probs=mixed_probs)
 
+    def get_mixture_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the per-expert mixture weights for a batch of inputs x.
+        Shape: [B, num_experts]. Only valid when weighted_sum=True.
+        """
+        assert self.weighted_sum, "Mixture weights only exist when weighted_sum=True"
+        with torch.no_grad():
+            hidden = self._forward_features(x)
+            weights = torch.softmax(self.actor(hidden), dim=1)
+        return weights
+
     def get_action_and_value(self, x, action=None):
         """Sample/score actions and obtain entropy+value for PPO optimisation."""
         hidden = self._forward_features(x)
@@ -575,6 +622,61 @@ def make_env(env_id, idx, capture_video, run_dir, target_device):
 
     return thunk
 
+def make_base_env(env_id, capture_video, run_dir):
+    """
+    Build Atari env with standard wrappers + MultiOCCAMWrapper (dict obs),
+    but WITHOUT the MoEWrapper. Used to evaluate each expert directly.
+    """
+    def thunk():
+        logger.set_level(args.logging_level)
+
+        if args.backend == "HackAtari":
+            from hackatari.core import HackAtari
+            modifs = [i for i in args.modifs.split(" ") if i]
+            env = HackAtari(
+                env_id,
+                modifs=modifs,
+                rewardfunc_path=args.new_rf,
+                obs_mode=args.obs_mode,
+                hud=False,
+                render_mode="rgb_array",
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
+            )
+        elif args.backend == "OCAtari":
+            from ocatari.core import OCAtari
+            env = OCAtari(
+                env_id,
+                hud=False,
+                render_mode="rgb_array",
+                obs_mode=args.obs_mode,
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
+            )
+        elif args.backend == "Gym":
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
+            env = gym.wrappers.ResizeObservation(env, (84, 84))
+            env = gym.wrappers.GrayScaleObservation(env)
+            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
+        else:
+            raise ValueError("Unknown Backend")
+
+        if capture_video:
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos_experts", disable_logger=True)
+
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = NoopResetEnv(env, noop_max=30)
+        env = EpisodicLifeEnv(env)
+        if "FIRE" in env.unwrapped.get_action_meanings():
+            env = FireResetEnv(env)
+
+        if args.include_raw_obs:
+            env = RawObservationCache(env)
+
+        # dict obs with one entry per OCCAM wrapper
+        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=args.moe_wrappers)
+        return env
+    return thunk
 
 if __name__ == "__main__":
     # Parse command-line arguments using Tyro
@@ -588,23 +690,35 @@ if __name__ == "__main__":
 
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
-        import wandb
+        import dataclasses, wandb
 
+        wb_dir = args.wandb_dir or str(Path("runs") / run_name)
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
             name=run_name,
-            monitor_gym=True,
+            config=dataclasses.asdict(args),
+            sync_tensorboard=True,
             save_code=True,
-            dir=args.wandb_dir
+            dir=wb_dir,
+            job_type="train",
+            group=f"{args.env_id}_{args.architecture}",
+            tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
+            resume="allow",
         )
+        wandb.define_metric("global_step")
+        wandb.define_metric("charts/*", step_metric="global_step")
+        wandb.define_metric("losses/*", step_metric="global_step")
+        wandb.define_metric("time/*", step_metric="global_step")
         writer_dir = run.dir
         postfix = dict(url=run.url)
+        weights_table = wandb.Table(columns=["step", "expert", "weight"])
     else:
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
+        
+
+
 
     # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
     writer = SummaryWriter(writer_dir)
@@ -670,6 +784,11 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    if args.track:
+        num_params = sum(p.numel() for p in agent.parameters())
+        wandb.summary["params_total"] = num_params
+        wandb.watch(agent, log="gradients", log_freq=1000, log_graph=False)
+        
     # Start the RTPT tracking
     rtpt.start()
 
@@ -843,23 +962,110 @@ if __name__ == "__main__":
                               elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
 
-        # Log other statistics
-        writer.add_scalar("charts/learning_rate",
-                          optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl",
-                          old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance",
-                          explained_var, global_step)
-        writer.add_scalar("charts/SPS", int(global_step /
-                          (time.time() - start_time)), global_step)
+        # --- MoE weights: compute once per iteration (if weighted_sum) ----------------
+        w = None
+        w_mean = None
+        w_entropy = None
+        if agent.weighted_sum:
+            with torch.no_grad():
+                sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
+                sample_size = min(2048, sample_obs.size(0))
+                idx = torch.randint(0, sample_obs.size(0), (sample_size,), device=sample_obs.device)
+                w = agent.get_mixture_weights(sample_obs[idx])     # [B, E]
+                w_mean = w.mean(dim=0).detach().cpu().numpy()      # [E]
+                w_entropy = (-(w * (w.clamp_min(1e-8)).log()).sum(dim=1)).mean().item()
 
-        # Update RTPT for progress tracking
+        # (optional) KL diagnostics every 50 iters
+        if args.track and agent.weighted_sum and iteration % 10 == 0:
+            with torch.no_grad():
+                x = sample_obs[idx[:min(512, sample_size)]]
+                weights = agent.get_mixture_weights(x)                       # [B,E]
+                experts = x[:, :agent.policy_feature_dim].reshape(x.size(0), agent.num_experts, agent.action_dim)
+                mixed = (weights.unsqueeze(-1) * experts).sum(dim=1).clamp_min(1e-8)
+                mixed = mixed / mixed.sum(dim=1, keepdim=True)
+                kl_per_expert = []
+                log_mixed = mixed.log()
+                for i in range(agent.num_experts):
+                    p_i = experts[:, i, :].clamp_min(1e-8)
+                    p_i = p_i / p_i.sum(dim=1, keepdim=True)
+                    kl = (mixed * (log_mixed - p_i.log())).sum(dim=1).mean().item()
+                    kl_per_expert.append(kl)
+            import wandb
+            for i, kl in enumerate(kl_per_expert):
+                name = _sanitize(agent.wrapper_names[i])
+                wandb.log({f"moe/KL_mixed_to_expert_{name}": kl}, step=global_step)
+
+        # --- RTPT tick ---------------------------------------------------------------
         rtpt.step()
+
+        # --- W&B enrichments: build payload ONCE, then append MoE things -------------
+        if args.track:
+            import wandb
+            log_payload = {
+                "global_step": global_step,
+                "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                "losses/value_loss": v_loss.item(),
+                "losses/policy_loss": pg_loss.item(),
+                "losses/entropy": entropy_loss.item(),
+                "losses/old_approx_kl": old_approx_kl.item(),
+                "losses/approx_kl": approx_kl.item(),
+                "losses/clipfrac": float(np.mean(clipfracs)),
+                "losses/explained_variance": float(explained_var),
+                "time/SPS": int(global_step / (time.time() - start_time)),
+            }
+            if count > 0:
+                if args.new_rf:
+                    log_payload["charts/Episodic_New_Reward"] = enewr / count
+                log_payload["charts/Episodic_Original_Reward"] = eorgr / count
+                log_payload["charts/Episodic_Length"] = elength / count
+            
+            import wandb, shutil, psutil, subprocess, json
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory().used / 1e9
+            disk_free = shutil.disk_usage(writer_dir).free / 1e9
+            log_payload["sys/cpu_percent"] = cpu
+            log_payload["sys/ram_used_GB"] = ram
+            log_payload["sys/disk_free_GB"] = disk_free
+
+            # Optional: GPU util & temp via nvidia-smi (if present)
+            if device.type == "cuda":
+                try:
+                    q = subprocess.check_output([
+                        "nvidia-smi",
+                        "--query-gpu=utilization.gpu,temperature.gpu,memory.free",
+                        "--format=csv,noheader,nounits"
+                    ]).decode().strip().splitlines()
+                    util, temp, memfree = map(float, q[0].split(","))
+                    log_payload["sys/gpu_util_pct"] = util
+                    log_payload["sys/gpu_temp_C"] = temp
+                    log_payload["sys/gpu_mem_free_MiB"] = memfree
+                except Exception:
+                    pass
+
+            # Append MoE diagnostics (if available)
+            if agent.weighted_sum:
+                log_payload["moe/weights_entropy"] = w_entropy
+                for e_idx, val in enumerate(w_mean):
+                    name = _sanitize(agent.wrapper_names[e_idx])
+                    log_payload[f"moe/weight_mean_{name}"] = float(val)
+                if iteration % 10 == 0 and w is not None:
+                    # each logging step
+                    for e_idx, val in enumerate(w_mean):
+                        name = _sanitize(agent.wrapper_names[e_idx])
+                        weights_table.add_data(int(global_step), name, float(val))
+
+            bar_table = wandb.Table(columns=["expert", "weight"])
+            for e_idx, val in enumerate(w_mean):
+                name = _sanitize(agent.wrapper_names[e_idx])
+                bar_table.add_data(name, float(val))
+
+            wandb.log({
+                "moe/weights_bar": wandb.plot.bar(
+                    bar_table, "expert", "weight", title="MoE mean weights (this step)"
+                )
+            }, step=global_step)
+            wandb.log(log_payload, step=global_step)
+    # --- End of training loop --------------------------------------------------------
 
     # Save the trained model to disk
     model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
@@ -903,6 +1109,26 @@ if __name__ == "__main__":
             list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
             latest_video = max(list_of_videos, key=os.path.getctime)
             wandb.log({"video": wandb.Video(latest_video)})
+
+        if args.track:
+            import wandb
+            # Evaluate each expert for, e.g., 5 episodes
+            expert_returns = {}
+            base_env_fn = make_base_env(args.env_id, False, writer_dir)
+            for wrapper_key in args.moe_wrappers:
+                rets = evaluate_expert(args.model_dir, base_env_fn, wrapper_key, episodes=5, device=device)
+                expert_returns[wrapper_key] = rets
+
+            # Log as a wandb.Table
+            rows = []
+            for k, rets in expert_returns.items():
+                rows.append([k, float(np.mean(rets)), float(np.std(rets)), int(len(rets))])
+            expert_table = wandb.Table(data=rows, columns=["expert", "mean_return", "std_return", "n_episodes"])
+            wandb.log({"eval/experts_table": expert_table})
+
+            # Quick scalar conveniences
+            for k, rets in expert_returns.items():
+                wandb.log({f"eval/expert/{k}/mean_return": float(np.mean(rets))})
 
         wandb.finish()
 
