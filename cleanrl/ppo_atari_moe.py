@@ -87,7 +87,7 @@ class Args:
     # Tracking (Logging and monitoring configurations)
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "PPObj-v2"
+    wandb_project_name: str = "OCCAM-MOE"
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
@@ -105,9 +105,6 @@ class Args:
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
-    architecture: str = "PPO_OBJ"
-    """ Specifies the used architecture"""
-
     total_timesteps: int = 10_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
@@ -160,6 +157,8 @@ class Args:
     """Include expert policies for the MoE input"""
     raw_obs_downsample: tuple[int, int] = (84, 84)
     """Target (height, width) for downsampling raw observations when included"""
+    sparse_moe_k: int = None
+    """Number of experts to consider at a time (top k)"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -168,8 +167,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-    masked_wrapper: str = "obj_dx"
-    """the obs_mode if a masking wrapper is needed"""
 
 
 agent_mapping = {
@@ -408,7 +405,7 @@ class MoEWrapper(ObservationWrapper):
 class MoEAgent(nn.Module):
     """Policy/value network that learns to fuse expert policies (plus optional pixels)."""
 
-    def __init__(self, envs, device, layer_dims=(128, 64), weighted_sum=True, include_policies=True):
+    def __init__(self, envs, device, layer_dims=(128, 64), weighted_sum=True, include_policies=True, top_k=None):
         """Build the MoE controller with configurable hidden layers and fusion mode."""
         super().__init__()
         self.device = device
@@ -424,6 +421,7 @@ class MoEAgent(nn.Module):
 
         self.include_policies = include_policies
         self.include_pixels = self.raw_obs_dim > 0 and self.encoded_raw_hw is not None
+        self.top_k = top_k
 
         assert self.include_policies or self.include_pixels
 
@@ -517,13 +515,19 @@ class MoEAgent(nn.Module):
 
     def _weighted_distribution(self, hidden, x):
         """Blend per-expert policies using the learned mixture weights."""
-        weights = torch.softmax(self.actor(hidden), dim=1)
+        weights = torch.softmax(self.actor(hidden), dim=1)  # (#envs, #experts)
         policy_part = x[:, :self.policy_feature_dim]
-        experts = policy_part.reshape(
-            x.size(0), self.num_experts, self.action_dim)
-        mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)
+        experts = policy_part.reshape(x.size(0), self.num_experts, self.action_dim)  # (#envs, #experts, #actions)
+
+        # top k
+        if self.top_k is not None:
+            weights, indices = torch.topk(weights, self.top_k, dim=1)  # both (#envs, k)
+            experts = torch.gather(experts, 1, indices.unsqueeze(-1).expand(-1, -1, experts.size(-1)))  # (#envs, k, #actions)
+
+        mixed_weights = weights.unsqueeze(-1) * experts  # (#envs, k or #experts, #actions)
+        mixed_probs = torch.sum(mixed_weights, dim=1)  # (#envs, #actions)
         mixed_probs = torch.clamp(mixed_probs, min=1e-8)
-        mixed_probs = mixed_probs / mixed_probs.sum(dim=1, keepdim=True)
+        mixed_probs /= mixed_probs.sum(dim=1, keepdim=True)
         return Categorical(probs=mixed_probs)
 
     def get_mixture_weights(self, x: torch.Tensor) -> torch.Tensor:
@@ -762,7 +766,7 @@ if __name__ == "__main__":
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
 
-    agent = MoEAgent(envs, device, args.layer_dims).to(device)
+    agent = MoEAgent(envs, device, args.layer_dims, top_k=args.sparse_moe_k).to(device)
 
     # Initialize optimizer for training
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -1088,7 +1092,8 @@ if __name__ == "__main__":
                            env_id=args.env_id,
                            capture_video=args.capture_video,
                            run_dir=writer_dir,
-                           device=device)
+                           device=device,
+                           target_device=device)
 
         wandb.log({"FinalReward": np.mean(rewards)})
 
@@ -1099,7 +1104,8 @@ if __name__ == "__main__":
                                env_id=args.env_id,
                                capture_video=args.capture_video,
                                run_dir=writer_dir,
-                               device=device)
+                               device=device,
+                               target_device=device)
 
             wandb.log({"HackAtariReward": np.mean(rewards)})
 
