@@ -167,6 +167,19 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    
+    # Expert mixing epsilon parameters
+    eps_start: float = 0.5
+    """initial epsilon for expert mixing (more uniform routing early)"""
+    eps_end: float = 0.0
+    """final epsilon for expert mixing (pure learned routing late)"""
+    eps_decay_steps: int = 200_000
+    """how many environment steps to decay epsilon over"""
+    lb_coeff: float = 0.00
+    """coefficient for load-balancing auxiliary loss on expert usage"""
+    top1_steps: float = 10_000_000
+    """fraction of training after which we enable hard top-1 routing at action time"""
+
 
 
 agent_mapping = {
@@ -201,6 +214,7 @@ def load_agent(env, model_dir, game_name, wrapper, target_device):
     ppo_agent.eval()
 
     return ppo_agent
+
 
 
 class PPOAgent(nn.Module):
@@ -513,22 +527,52 @@ class MoEAgent(nn.Module):
         logits = self.actor(hidden)
         return Categorical(logits=logits)
 
-    def _weighted_distribution(self, hidden, x):
-        """Blend per-expert policies using the learned mixture weights."""
-        weights = torch.softmax(self.actor(hidden), dim=1)  # (#envs, #experts)
-        policy_part = x[:, :self.policy_feature_dim]
-        experts = policy_part.reshape(x.size(0), self.num_experts, self.action_dim)  # (#envs, #experts, #actions)
+    def _weighted_distribution(self, hidden, x, epsilon: float = 0.0, top1_act: bool = False):
+        # gate
+        weights = torch.softmax(self.actor(hidden), dim=1)  # [B, E]
 
-        # top k
-        if self.top_k is not None:
-            weights, indices = torch.topk(weights, self.top_k, dim=1)  # both (#envs, k)
-            experts = torch.gather(experts, 1, indices.unsqueeze(-1).expand(-1, -1, experts.size(-1)))  # (#envs, k, #actions)
+        # epsilon smoothing for exploration (optional)
+        if epsilon > 0.0:
+            uniform = torch.full_like(weights, 1.0 / self.num_experts)
+            weights = (1.0 - epsilon) * weights + epsilon * uniform
+            weights = weights / weights.sum(dim=1, keepdim=True)
 
-        mixed_weights = weights.unsqueeze(-1) * experts  # (#envs, k or #experts, #actions)
-        mixed_probs = torch.sum(mixed_weights, dim=1)  # (#envs, #actions)
+        policy_part = x[:, :self.policy_feature_dim]  # [B, E*A]
+        experts = policy_part.reshape(x.size(0), self.num_experts, self.action_dim)
+        experts = torch.clamp(experts, min=1e-8)
+        experts = experts / experts.sum(dim=2, keepdim=True)
+
+        if top1_act:
+            # pick the single expert with max weight for each batch element
+            top_idx = torch.argmax(weights, dim=1)  # [B]
+            # gather that expert's probs
+            mixed_probs = experts[torch.arange(x.size(0)), top_idx, :]  # [B, A]
+            # still return the full weights so we can log/regularize
+            chosen_weights = torch.zeros_like(weights)
+            chosen_weights[torch.arange(x.size(0)), top_idx] = 1.0
+            final_weights = chosen_weights
+        else:
+            # soft blend
+            mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)  # [B, A]
+            final_weights = weights
+
         mixed_probs = torch.clamp(mixed_probs, min=1e-8)
-        mixed_probs /= mixed_probs.sum(dim=1, keepdim=True)
-        return Categorical(probs=mixed_probs)
+        mixed_probs = mixed_probs / mixed_probs.sum(dim=1, keepdim=True)
+
+        return Categorical(probs=mixed_probs), final_weights
+
+
+    def current_epsilon(self, global_step: int, eps_start: float, eps_end: float, eps_decay_steps: int) -> float:
+        """Linear decay of epsilon w.r.t. env steps."""
+        # progress = min(1.0, global_step / eps_decay_steps)
+        # eps = eps_start + progress * (eps_end - eps_start)
+        # We clamp so it never goes below eps_end or above eps_start.
+        if eps_decay_steps <= 0:
+            return eps_end
+        progress = float(global_step) / float(eps_decay_steps)
+        if progress > 1.0:
+            progress = 1.0
+        return eps_start + progress * (eps_end - eps_start)
 
     def get_mixture_weights(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -541,16 +585,26 @@ class MoEAgent(nn.Module):
             weights = torch.softmax(self.actor(hidden), dim=1)
         return weights
 
-    def get_action_and_value(self, x, action=None):
-        """Sample/score actions and obtain entropy+value for PPO optimisation."""
+    def get_action_and_value(self, x, action=None, epsilon: float = 0.0, top1_act: bool = False):
         hidden = self._forward_features(x)
         if self.weighted_sum:
-            categorical = self._weighted_distribution(hidden, x)
+            categorical, mixed_weights = self._weighted_distribution(
+                hidden, x, epsilon, top1_act=top1_act
+            )
         else:
             categorical = self._direct_distribution(hidden)
+            mixed_weights = None
+
         if action is None:
             action = categorical.sample()
-        return action, categorical.log_prob(action), categorical.entropy(), self.critic(hidden)
+
+        return (
+            action,
+            categorical.log_prob(action),
+            categorical.entropy(),
+            self.critic(hidden),
+            mixed_weights,
+        )
 
 
 # Global variable to hold parsed arguments
@@ -691,7 +745,7 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-
+    
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
         import dataclasses, wandb
@@ -706,8 +760,8 @@ if __name__ == "__main__":
             save_code=True,
             dir=wb_dir,
             job_type="train",
-            group=f"{args.env_id}_{args.architecture}",
-            tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
+            group=f"{args.env_id}",
+            tags=[args.env_id, args.backend, args.obs_mode],
             resume="allow",
         )
         wandb.define_metric("global_step")
@@ -832,10 +886,18 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            # Get action and value from agent
+            use_top1 = global_step >= args.top1_steps
+            eps_now = agent.current_epsilon(
+                global_step=global_step,
+                eps_start=args.eps_start,
+                eps_end=args.eps_end,
+                eps_decay_steps=args.eps_decay_steps,
+            )
+
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(
-                    next_obs)
+                action, logprob, _, value, _ = agent.get_action_and_value(
+                    next_obs, epsilon=eps_now, top1_act=use_top1
+                )
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -895,8 +957,12 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(
+                    b_obs[mb_inds],
+                    b_actions.long()[mb_inds],
+                    epsilon=eps_now,
+                    top1_act=False,
+                )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -935,9 +1001,33 @@ if __name__ == "__main__":
                     v_loss = 0.5 * \
                         ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
+                # Load-balancing loss (encourage all experts to get some traffic)
+                if mixed_weights_train is not None:
+                    # average routing prob per expert this minibatch
+                    freq = mixed_weights_train.mean(dim=0)  # [E]
+                    # uniform target
+                    uniform = torch.full_like(freq, 1.0 / agent.num_experts)
+                    # KL(freq || uniform) = sum_i freq_i * (log freq_i - log uniform_i)
+                    lb_loss = torch.sum(
+                        freq * (freq.clamp_min(1e-8).log() - uniform.log())
+                    )
+                else:
+                    lb_loss = torch.tensor(0.0, device=device)
+    
+                last_lb_loss = lb_loss.detach()
+                last_freq = freq.detach() if mixed_weights_train is not None else None
+
                 # Entropy loss (for exploration)
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                
+                # PPO total loss + load balance penalty
+                loss = (
+                    pg_loss
+                    - args.ent_coef * entropy_loss
+                    + v_loss * args.vf_coef
+                    + args.lb_coeff * lb_loss
+                )
+
 
                 # Backpropagation and optimizer step
                 optimizer.zero_grad()
@@ -977,7 +1067,14 @@ if __name__ == "__main__":
                 idx = torch.randint(0, sample_obs.size(0), (sample_size,), device=sample_obs.device)
                 w = agent.get_mixture_weights(sample_obs[idx])     # [B, E]
                 w_mean = w.mean(dim=0).detach().cpu().numpy()      # [E]
-                w_entropy = (-(w * (w.clamp_min(1e-8)).log()).sum(dim=1)).mean().item()
+                w = agent.get_mixture_weights(sample_obs[idx])  # [B, E], raw gate p
+                uniform = torch.ones_like(w) / w.size(1)
+                w_blend = (1 - eps_now) * w + eps_now * uniform  # p_final
+
+                # entropies
+                entropy_raw = (-(w.clamp_min(1e-8) * w.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
+                entropy_blend = (-(w_blend.clamp_min(1e-8) * w_blend.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
+
 
         # (optional) KL diagnostics every 50 iters
         if args.track and agent.weighted_sum and iteration % 10 == 0:
@@ -1048,7 +1145,9 @@ if __name__ == "__main__":
 
             # Append MoE diagnostics (if available)
             if agent.weighted_sum:
-                log_payload["moe/weights_entropy"] = w_entropy
+                log_payload["moe/weights_entropy_raw"] = entropy_raw        # gate's true belief
+                log_payload["moe/weights_entropy_eps_sorblend"] = entropy_blend    # what was actually used
+                log_payload["moe/epsilon"] = float(eps_now)
                 for e_idx, val in enumerate(w_mean):
                     name = _sanitize(agent.wrapper_names[e_idx])
                     log_payload[f"moe/weight_mean_{name}"] = float(val)
@@ -1057,6 +1156,13 @@ if __name__ == "__main__":
                     for e_idx, val in enumerate(w_mean):
                         name = _sanitize(agent.wrapper_names[e_idx])
                         weights_table.add_data(int(global_step), name, float(val))
+                        
+                log_payload["moe/load_balance_loss"] = float(last_lb_loss.item())
+
+                if last_freq is not None:
+                    for e_idx, val in enumerate(last_freq.cpu().numpy()):
+                        name = _sanitize(agent.wrapper_names[e_idx])
+                        log_payload[f"moe/batch_usage_frac_{name}"] = float(val)
 
             bar_table = wandb.Table(columns=["expert", "weight"])
             for e_idx, val in enumerate(w_mean):
@@ -1071,8 +1177,9 @@ if __name__ == "__main__":
             wandb.log(log_payload, step=global_step)
     # --- End of training loop --------------------------------------------------------
 
+    name = f"{args.exp_name}_s{args.seed}".replace("+", "_")
     # Save the trained model to disk
-    model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
+    model_path = f"{writer_dir}/{name}_final.cleanrl_model"
     model_data = {
         "model_weights": agent.state_dict(),
         "args": vars(args),
@@ -1083,7 +1190,7 @@ if __name__ == "__main__":
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
         # Log model to Weights and Biases
-        name = f"{args.exp_name}_s{args.seed}"
+        name = f"{args.exp_name}_s{args.seed}".replace("+", "_")
         run.log_model(model_path, name)  # noqa: cannot be undefined
 
         # Evaluate agent's performance
