@@ -159,6 +159,9 @@ class Args:
     """Target (height, width) for downsampling raw observations when included"""
     sparse_moe_k: int = None
     """Number of experts to consider at a time (top k)"""
+    topk_steps: float = 10_000_000
+    """fraction of training after which we enable hard top-1 routing at action time"""
+
 
     # to be filled in runtime
     batch_size: int = 0
@@ -173,11 +176,11 @@ class Args:
     """initial epsilon for expert mixing (more uniform routing early)"""
     eps_end: float = 0.0
     """final epsilon for expert mixing (pure learned routing late)"""
-    eps_decay_steps: int = 200_000
+    eps_decay_steps: int = 000
     """how many environment steps to decay epsilon over"""
     lb_coeff: float = 0.00
     """coefficient for load-balancing auxiliary loss on expert usage"""
-    top1_steps: float = 10_000_000
+    topk_steps: float = 10_000_000
     """fraction of training after which we enable hard top-1 routing at action time"""
 
 
@@ -527,7 +530,7 @@ class MoEAgent(nn.Module):
         logits = self.actor(hidden)
         return Categorical(logits=logits)
 
-    def _weighted_distribution(self, hidden, x, epsilon: float = 0.0, top1_act: bool = False):
+    def _weighted_distribution(self, hidden, x, epsilon: float = 0.0, top_k: int = None):
         # gate
         weights = torch.softmax(self.actor(hidden), dim=1)  # [B, E]
 
@@ -542,15 +545,12 @@ class MoEAgent(nn.Module):
         experts = torch.clamp(experts, min=1e-8)
         experts = experts / experts.sum(dim=2, keepdim=True)
 
-        if top1_act:
-            # pick the single expert with max weight for each batch element
-            top_idx = torch.argmax(weights, dim=1)  # [B]
-            # gather that expert's probs
-            mixed_probs = experts[torch.arange(x.size(0)), top_idx, :]  # [B, A]
-            # still return the full weights so we can log/regularize
-            chosen_weights = torch.zeros_like(weights)
-            chosen_weights[torch.arange(x.size(0)), top_idx] = 1.0
-            final_weights = chosen_weights
+       # top k
+        if top_k is not None:
+            weights, indices = torch.topk(weights, self.top_k, dim=1)  # both (#envs, k)
+            experts = torch.gather(experts, 1, indices.unsqueeze(-1).expand(-1, -1, experts.size(-1)))  # (#envs, k, #actions)
+            final_weights = weights.unsqueeze(-1) * experts  # (#envs, k or #experts, #actions)
+
         else:
             # soft blend
             mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)  # [B, A]
@@ -585,11 +585,11 @@ class MoEAgent(nn.Module):
             weights = torch.softmax(self.actor(hidden), dim=1)
         return weights
 
-    def get_action_and_value(self, x, action=None, epsilon: float = 0.0, top1_act: bool = False):
+    def get_action_and_value(self, x, action=None, epsilon: float = 0.0, top_k: int = None):
         hidden = self._forward_features(x)
         if self.weighted_sum:
             categorical, mixed_weights = self._weighted_distribution(
-                hidden, x, epsilon, top1_act=top1_act
+                hidden, x, epsilon, top_k=top_k
             )
         else:
             categorical = self._direct_distribution(hidden)
@@ -597,6 +597,7 @@ class MoEAgent(nn.Module):
 
         if action is None:
             action = categorical.sample()
+            #action = categorical.probs.argmax(dim=1)  # greedy action for eval
 
         return (
             action,
@@ -699,7 +700,8 @@ def make_base_env(env_id, capture_video, run_dir):
                 hud=False,
                 render_mode="rgb_array",
                 frameskip=args.frameskip,
-                create_buffer_stacks=[]
+                create_buffer_stacks=[],
+                repeat_action_probability=0.25
             )
         elif args.backend == "OCAtari":
             from ocatari.core import OCAtari
@@ -709,7 +711,8 @@ def make_base_env(env_id, capture_video, run_dir):
                 render_mode="rgb_array",
                 obs_mode=args.obs_mode,
                 frameskip=args.frameskip,
-                create_buffer_stacks=[]
+                create_buffer_stacks=[],
+                repeat_action_probability=0.25
             )
         elif args.backend == "Gym":
             env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
@@ -724,12 +727,12 @@ def make_base_env(env_id, capture_video, run_dir):
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
-        env = EpisodicLifeEnv(env)
+        # env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        if args.include_raw_obs:
-            env = RawObservationCache(env)
+        #if args.include_raw_obs:
+        #    env = RawObservationCache(env)
 
         # dict obs with one entry per OCCAM wrapper
         env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=args.moe_wrappers)
@@ -886,7 +889,7 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            use_top1 = global_step >= args.top1_steps
+            use_top_k = 1 if global_step >= args.topk_steps else None
             eps_now = agent.current_epsilon(
                 global_step=global_step,
                 eps_start=args.eps_start,
@@ -896,7 +899,7 @@ if __name__ == "__main__":
 
             with torch.no_grad():
                 action, logprob, _, value, _ = agent.get_action_and_value(
-                    next_obs, epsilon=eps_now, top1_act=use_top1
+                    next_obs, epsilon=eps_now, top_k=use_top_k
                 )
                 values[step] = value.flatten()
             actions[step] = action
@@ -961,7 +964,7 @@ if __name__ == "__main__":
                     b_obs[mb_inds],
                     b_actions.long()[mb_inds],
                     epsilon=eps_now,
-                    top1_act=False,
+                    top_k=None,
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
