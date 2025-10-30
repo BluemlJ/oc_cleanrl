@@ -1101,7 +1101,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 x = sample_obs[idx[:min(512, sample_size)]]
                 weights = agent.get_mixture_weights(x)                       # [B,E]
-                experts = x[:, :agent.expert_feature_dim].reshape(x.size(0), agent.num_experts, agent.action_dim)
+                experts = x[:, :agent.expert_feature_dim].reshape(x.size(0), agent.num_experts, -1)[..., :agent.action_dim]
                 mixed = (weights.unsqueeze(-1) * experts).sum(dim=1).clamp_min(1e-8)
                 mixed = mixed / mixed.sum(dim=1, keepdim=True)
                 kl_per_expert = []
