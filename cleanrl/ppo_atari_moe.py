@@ -156,7 +156,7 @@ class Args:
     include_policies: bool = False
     """Include expert policies for the MoE input"""
     include_values: bool = False
-    """Include expert values for the MoE input (must be used in with inlude_policies)"""
+    """Include expert values for the MoE input (must be used in with include_policies)"""
     raw_obs_downsample: tuple[int, int] = (84, 84)
     """Target (height, width) for downsampling raw observations when included"""
     sparse_moe_k: int = None
@@ -571,7 +571,11 @@ class MoEAgent(nn.Module):
             weights = weights / weights.sum(dim=1, keepdim=True)  # re-normalize
 
         mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)  # (B, #actions)
-        mixed_values = torch.sum(values * weights, dim=1)  # (B,)
+
+        # use unweighted mean to prevent advantage cheating
+        mixed_values = values.mean(dim=1)  # (B,)
+        # mixed_values = torch.sum(values * weights, dim=1)  # (B,)
+
 
         return Categorical(probs=mixed_probs), mixed_values.detach(), weights
 
@@ -1043,7 +1047,7 @@ if __name__ == "__main__":
                 # PPO total loss + load balance penalty
                 loss = (
                     pg_loss
-                    - args.ent_coef * entropy_loss
+                    # - args.ent_coef * entropy_loss
                     # + v_loss * args.vf_coef
                     + args.lb_coeff * lb_loss
                 )
