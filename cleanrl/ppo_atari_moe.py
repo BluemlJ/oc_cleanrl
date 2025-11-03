@@ -125,11 +125,11 @@ class Args:
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
-    clip_coef: float = 0.1
+    clip_coef: float = 0.2
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.01
+    ent_coef: float = 0.00
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -169,7 +169,7 @@ class Args:
     """final epsilon for expert mixing (pure learned routing late)"""
     eps_decay_steps: int = 000
     """how many environment steps to decay epsilon over"""
-    lb_coeff: float = 0.00
+    lb_coeff: float = 0
     """coefficient for load-balancing auxiliary loss on expert usage"""
     topk_steps: float = 10_000_000
     """fraction of training after which we enable hard top-1 routing at action time"""
@@ -194,6 +194,44 @@ agent_mapping = {
             "dqn": "pixel_ppo",
             #"obj": "obj_ppo_large",
         }
+
+@torch.no_grad()
+def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
+    # x: [B, D] MoE input
+    B = x.size(0)
+    A = agent.action_dim
+    E = agent.num_experts
+    F = agent.expert_feature_dim
+
+    # reconstruct experts and weights
+    feats = x[:, :F].reshape(B, E, A + 1)
+    experts = feats[..., :A].clamp_min(1e-8)
+    experts = experts / experts.sum(dim=2, keepdim=True)
+
+    hidden = agent._forward_features(x)
+    logits = agent.actor(hidden)
+    weights = torch.softmax(logits, dim=1)  # [B,E]
+    mix = (weights.unsqueeze(-1) * experts).sum(dim=1).clamp_min(1e-8)
+    mix = mix / mix.sum(dim=1, keepdim=True)
+
+    # recompute via categorical produced by the model (should match `mix`)
+    cat, _, _ = agent._weighted_distribution(hidden, x, epsilon=0.0, top_k=False)
+    model_mix = cat.probs
+    diff = (mix - model_mix).abs().max().item()
+
+    # if any top-1 confident, verify it matches that expert
+    maxw, idx = weights.max(dim=1)
+    mask = (maxw >= 0.99)
+    kl_top = None
+    if mask.any():
+        top_exp = experts[mask, idx[mask], :].clamp_min(1e-8)
+        sel_mix = mix[mask].clamp_min(1e-8)
+        kl_top = (sel_mix * (sel_mix.log() - top_exp.log())).sum(dim=1).mean().item()
+
+    if verbose:
+        print(f"[check_mixing] max |mix - model_mix| = {diff:.3e}, KL(mix||top)={kl_top}")
+    return diff, kl_top
+
 
 def _sanitize(name: str) -> str:
     """Turn wrapper name into a safe tag for W&B keys/plots."""
@@ -310,19 +348,28 @@ class MoEWrapper(ObservationWrapper):
         assert isinstance(env.observation_space, gym.spaces.Dict)
         assert isinstance(env.action_space, gym.spaces.Discrete)
 
-        self.device = target_device if isinstance(
-            target_device, torch.device) else torch.device(target_device)
+        super().__init__(env)  # <-- move super() early
+
+        # device first
+        self.device = target_device if isinstance(target_device, torch.device) else torch.device(target_device)
+
+        # stable, explicit wrapper order
+        self.wrapper_order = list(getattr(args, "moe_wrappers", ()))
+        for w in self.wrapper_order:
+            assert w in self.env.wrappers, f"Unknown wrapper '{w}'. Available: {list(self.env.wrappers.keys())}"
+
+        # load experts **once** in the explicit order
+        self.agents = {
+            w: load_agent(self.env.wrappers[w], model_dir, self.env.unwrapped.game_name, w, self.device)
+            for w in self.wrapper_order
+        }
+
+        self.num_experts = len(self.wrapper_order)
+        self.action_dim = self.env.unwrapped.action_space.n
+        self.expert_feature_dim = (self.action_dim + 1) * self.num_experts
+
         self.include_raw_obs = include_raw_obs
         self.target_hw = downsample_hw
-        self.agents = {}
-        for wrapper in env.wrappers:  # noqa: should wrap an occam multi wrapper
-            self.agents[wrapper] = load_agent(env.wrappers[wrapper], model_dir, env.unwrapped.game_name, wrapper, self.device)
-
-        super().__init__(env)
-
-        self.num_experts = len(self.agents)
-        self.action_dim = env.unwrapped.action_space.n
-        self.expert_feature_dim = (self.action_dim + 1) * self.num_experts  # +1 for value
 
         if include_raw_obs:
             raw_space = env.unwrapped.observation_space
@@ -355,12 +402,13 @@ class MoEWrapper(ObservationWrapper):
         # get the policy and value from all experts and concatenate it into one long vector
         with torch.no_grad():
             policy_chunks = []
-            for key, agent in self.agents.items():
+            for key in self.wrapper_order:     # <- use the fixed order
+                agent = self.agents[key]
                 policy, value = agent(observation[key])
                 policy_chunks.append(
                     np.append(policy.probs[0].detach().cpu().numpy().astype(np.float32), value)
                 )
-        policy_vec = np.concatenate(policy_chunks, axis=0).astype(np.float32)
+            policy_vec = np.concatenate(policy_chunks, axis=0).astype(np.float32)
 
         if self.raw_obs_dim == 0:
             # Raw pixels disabled: only feed expert policy probabilities downstream
@@ -527,17 +575,22 @@ class MoEAgent(nn.Module):
 
         return self.fusion_network(features)  # noqa: only undefined if both False, crashes earlier
 
+    # def get_value(self, x):
+    #     """Estimate the value function for PPO updates."""
+    #     hidden = self._forward_features(x)
+    #     if self.weighted_sum:
+    #         # use the mixed value
+    #         _, value, mixed_weights = self._weighted_distribution(
+    #             hidden, x, 0.0
+    #         )
+    #     else:
+    #         raise NotImplementedError  # todo maybe just train a critic in this case
+    #     return value
+    
     def get_value(self, x):
-        """Estimate the value function for PPO updates."""
         hidden = self._forward_features(x)
-        if self.weighted_sum:
-            # use the mixed value
-            _, value, mixed_weights = self._weighted_distribution(
-                hidden, x, 0.0
-            )
-        else:
-            raise NotImplementedError  # todo maybe just train a critic in this case
-        return value
+        return self.critic(hidden).squeeze(-1)
+
 
     def _direct_distribution(self, hidden):
         """Return a categorical distribution directly from the actor head."""
@@ -606,25 +659,15 @@ class MoEAgent(nn.Module):
     def get_action_and_value(self, x, action=None, epsilon: float = 0.0, top_k=False):
         hidden = self._forward_features(x)
         if self.weighted_sum:
-            categorical, value, mixed_weights = self._weighted_distribution(
-                hidden, x, epsilon, top_k=top_k
-            )
+            categorical, _, mixed_weights = self._weighted_distribution(hidden, x, epsilon, top_k=top_k)
         else:
             categorical = self._direct_distribution(hidden)
             mixed_weights = None
-            value = torch.zeros(self.num_experts)
-
         if action is None:
             action = categorical.sample()
-            #action = categorical.probs.argmax(dim=1)  # greedy action for eval
+        value = self.critic(hidden).squeeze(-1)
+        return action, categorical.log_prob(action), categorical.entropy(), value, mixed_weights
 
-        return (
-            action,
-            categorical.log_prob(action),
-            categorical.entropy(),
-            value,
-            mixed_weights,
-        )
 
 
 # Global variable to hold parsed arguments
@@ -896,7 +939,7 @@ if __name__ == "__main__":
                 "Timesteps": iteration * args.batch_size
             }
             torch.save(model_data, model_path)
-            logger.info(f"model saved to {model_path} in epoch {epoch}")
+            logger.info(f"model saved to {model_path} in epoch {iteration}")
 
             # Log model with Weights and Biases if enabled
             if args.track:
@@ -916,12 +959,13 @@ if __name__ == "__main__":
                 eps_decay_steps=args.eps_decay_steps,
             )
 
+                
             with torch.no_grad():
                 action, logprob, _, value, _ = agent.get_action_and_value(
-                    next_obs, epsilon=eps_now,
-                    top_k=(global_step >= args.topk_steps)
+                    next_obs, epsilon=eps_now, top_k=(global_step >= args.topk_steps)
                 )
-                values[step] = value.flatten()
+                values[step] = value  # shape: [num_envs]
+
             actions[step] = action
             logprobs[step] = logprob
 
@@ -980,7 +1024,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, _, mixed_weights_train = agent.get_action_and_value(
+                _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(
                     b_obs[mb_inds],
                     b_actions.long()[mb_inds],
                     epsilon=eps_now,
@@ -1008,21 +1052,19 @@ if __name__ == "__main__":
                     torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss
-                # newvalue = newvalue.view(-1)
-                # if args.clip_vloss:
-                #     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                #     v_clipped = b_values[mb_inds] + torch.clamp(
-                #         newvalue - b_values[mb_inds],
-                #         -args.clip_coef,
-                #         args.clip_coef,
-                #     )
-                #     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                #     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                #     v_loss = 0.5 * v_loss_max.mean()
-                # else:
-                #     v_loss = 0.5 * \
-                #         ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                #Value loss
+                newvalue = newvalue.view(-1)
+                if args.clip_vloss:
+                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    v_clipped = b_values[mb_inds] + torch.clamp(
+                        newvalue - b_values[mb_inds],
+                        -args.clip_coef, args.clip_coef,
+                    )
+                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+
 
                 # Load-balancing loss (encourage all experts to get some traffic)
                 if mixed_weights_train is not None:
@@ -1047,8 +1089,8 @@ if __name__ == "__main__":
                 # PPO total loss + load balance penalty
                 loss = (
                     pg_loss
-                    # - args.ent_coef * entropy_loss
-                    # + v_loss * args.vf_coef
+                    - args.ent_coef * entropy_loss
+                    + v_loss * args.vf_coef
                     + args.lb_coeff * lb_loss
                 )
 
@@ -1192,12 +1234,20 @@ if __name__ == "__main__":
                 name = _sanitize(agent.wrapper_names[e_idx])
                 bar_table.add_data(name, float(val))
 
-            wandb.log({
-                "moe/weights_bar": wandb.plot.bar(
-                    bar_table, "expert", "weight", title="MoE mean weights (this step)"
-                )
-            }, step=global_step)
+            #wandb.log({
+            #    "moe/weights_bar": wandb.plot.bar(
+            #        bar_table, "expert", "weight", title="MoE mean weights (this step)"
+            #    )
+            #}, step=global_step)
             wandb.log(log_payload, step=global_step)
+            
+            if iteration % 100 == 0:
+                sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
+                idx = torch.randint(0, sample_obs.size(0), (512,), device=sample_obs.device)
+                dmax, kl_top = check_mixing(agent, sample_obs[idx])
+                if args.track:
+                    wandb.log({"moe/mix_diff_max": dmax, "moe/kl_mix_to_top_if_conf": (kl_top or 0.0)}, step=global_step)
+                
     # --- End of training loop --------------------------------------------------------
 
     name = f"{args.exp_name}_s{args.seed}".replace("+", "_")
@@ -1208,7 +1258,7 @@ if __name__ == "__main__":
         "args": vars(args),
     }
     torch.save(model_data, model_path)
-    logger.info(f"model saved to {model_path} in epoch {epoch}")
+    logger.info(f"model saved to {model_path} in epoch {iteration}")
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
