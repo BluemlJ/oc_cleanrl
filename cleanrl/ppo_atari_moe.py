@@ -469,6 +469,12 @@ class MoEWrapper(ObservationWrapper):
         return arr.reshape(-1)
 
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.xavier_normal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
 class MoEAgent(nn.Module):
     """Policy/value network that learns to fuse expert policies (plus optional pixels)."""
 
@@ -482,7 +488,7 @@ class MoEAgent(nn.Module):
             base_env = base_env.venv
         self.action_dim = base_env.get_attr("action_dim")[0]  # = expert policy length
         self.num_experts = base_env.get_attr("num_experts")[0]
-        self.expert_feature_dim = base_env.get_attr("expert_feature_dim")[0]  # = #actions + #experts
+        self.expert_feature_dim = base_env.get_attr("expert_feature_dim")[0]  # = (#actions + 1) * #experts
         self.raw_obs_dim = base_env.get_attr("raw_obs_dim")[0]  # length of flat image
         self.encoded_raw_hw = base_env.get_attr("encoded_raw_hw")[0]  # actual image size
 
@@ -490,6 +496,8 @@ class MoEAgent(nn.Module):
             self.policy_input_dim = self.expert_feature_dim
         else:
             self.policy_input_dim = self.expert_feature_dim - self.num_experts
+
+        self.per_expert_dim = self.policy_input_dim // self.num_experts
 
         self.include_policies = include_policies
         self.include_pixels = self.raw_obs_dim > 0 and self.encoded_raw_hw is not None
@@ -524,7 +532,7 @@ class MoEAgent(nn.Module):
             conv_out_h = raw_h // 4
             conv_out_w = raw_w // 4
             conv_out_dim = 16 * conv_out_h * conv_out_w
-            raw_hidden_dim = policy_hidden_dim
+            raw_hidden_dim = max(policy_hidden_dim, 16)
             self.raw_project = nn.Sequential(
                 layer_init(nn.Linear(conv_out_dim, raw_hidden_dim)),
                 nn.ReLU(),
@@ -558,10 +566,12 @@ class MoEAgent(nn.Module):
         self.critic = layer_init(nn.Linear(feature_dim, 1), std=1)
 
     def _forward_features(self, x):
-        policy_part = x[:, :self.policy_input_dim]
-
         if self.include_policies:
-            features = self.policy_branch(policy_part)
+            policy_value_part = x[:, :self.expert_feature_dim]  # (B, #experts * [#actions + #experts])
+            experts_and_values = policy_value_part.reshape(x.size(0), self.num_experts, self.action_dim + 1)  # +1 for the value
+            input_features = torch.clamp(experts_and_values[..., :self.per_expert_dim], min=1e-8)  # strip the values if necessary
+
+            features = self.policy_branch(input_features.reshape(x.size(0), -1))
         if self.include_pixels:
             raw_part = x[:, self.expert_feature_dim:]
             raw_h, raw_w = self.encoded_raw_hw
@@ -603,9 +613,8 @@ class MoEAgent(nn.Module):
 
         # epsilon smoothing for exploration (optional)
         if epsilon > 0.0:
-            uniform = torch.full_like(weights, 1.0 / self.num_experts)
-            weights = (1.0 - epsilon) * weights + epsilon * uniform
-
+            weights = weights + epsilon * torch.rand_like(weights)
+            weights = weights.clamp_min(1e-8)
             weights = weights / weights.sum(dim=1, keepdim=True)  # re-normalize
 
         policy_value_part = x[:, :self.expert_feature_dim]  # (B, #experts * [#actions + #experts])
