@@ -17,7 +17,7 @@ def evaluate(
     obs, _ = envs.reset()
     episodic_returns = []
     while len(episodic_returns) < eval_episodes:
-        actions, _, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+        actions = agent.get_action_and_value(torch.Tensor(obs).to(device))[0]
         next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
         if "final_info" in infos:
             for info in infos["final_info"]:
