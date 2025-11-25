@@ -28,6 +28,8 @@ from stable_baselines3.common.atari_wrappers import (
 )
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 
+import ocatari_wrappers
+
 from typing import Literal
 
 # -----------------------
@@ -278,7 +280,6 @@ def make_env(env_id, idx, seed, capture_video, run_dir):
         if (args.detection_failure_probability > 0
                 or args.mislabeling_probability > 0
                 or args.noise_std > 0):
-            import ocatari_wrappers
             env = ocatari_wrappers.ImperfectDetectionWrapper(
                 env,
                 args.detection_failure_probability,
@@ -341,7 +342,6 @@ if __name__ == "__main__":
 
     # Prepare masking wrapper flags
     if "masked" in args.obs_mode:
-        import ocatari_wrappers
         if args.obs_mode.endswith("+pixels"):
             args.masked_wrapper = args.obs_mode[:-7]
             args.add_pixels = True
