@@ -75,7 +75,9 @@ class Args:
     """the id of the environment"""
     obs_mode: Literal[
         "dqn", "obj", "masked_dqn_bin", "masked_dqn_pixels",
-        "masked_dqn_planes", "masked_dqn_grayscale", "masked_dqn_pixel_planes", "masked_dqn_parallelplanes"
+        "masked_dqn_planes", "masked_dqn_grayscale", "masked_dqn_pixel_planes", "masked_dqn_parallelplanes",
+        "masked_dqn_bin+pixels", "masked_dqn_pixels+pixels",
+        "masked_dqn_planes+pixels", "masked_dqn_grayscale+pixels", "masked_dqn_pixel_planes+pixels",
     ] = "dqn"
     """observation mode for OCAtari"""
     buffer_window_size: int = 4
