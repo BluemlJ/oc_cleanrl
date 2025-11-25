@@ -220,7 +220,7 @@ def _log_model_artifact(run, path, name, iteration=None, metadata=None):
 # -----------------------
 # Env factory with per-worker seeding
 # -----------------------
-def make_env(env_id, idx, seed, capture_video, run_dir):
+def make_env(env_id, idx, capture_video, run_dir, seed=None):
     """
     Creates a gym environment with the specified settings and seeds it.
     """
@@ -404,7 +404,7 @@ if __name__ == "__main__":
 
     # Vectorized envs with per-worker seeds
     envs = SubprocVecEnv(
-        [make_env(args.env_id, i, args.seed + i, args.capture_video, writer_dir) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, writer_dir, seed=args.seed + i) for i in range(args.num_envs)]
     )
     envs = VecNormalize(envs, norm_obs=False, norm_reward=True)
 
