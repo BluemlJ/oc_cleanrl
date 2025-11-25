@@ -229,7 +229,8 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
         os.environ["PYTHONHASHSEED"] = str(seed)
         random.seed(seed)
         np.random.seed(seed)
-        torch.manual_seed(seed)
+        if seed is not None:
+            torch.manual_seed(seed)
 
         logger.set_level(args.logging_level)
 
