@@ -131,9 +131,9 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.01
+    ent_coef: float = 0.0
     """coefficient of the entropy"""
-    vf_coef: float = 0.01
+    vf_coef: float = 0.5
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
@@ -906,7 +906,9 @@ if __name__ == "__main__":
                 )
 
                 # Backpropagation and optimizer step
-                optimizer.zero_grad()
+                for param in agent.parameters():
+                    param.grad = None
+                    
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     agent.parameters(), args.max_grad_norm)
@@ -998,6 +1000,8 @@ if __name__ == "__main__":
                 "diagnostics/adv_std": adv_std,
                 "diagnostics/delta_mean": delta.mean().item(),
                 "diagnostics/delta_std": delta.std().item(),
+                "diagnostics/reward_std": rewards.std().item(),
+                "diagnostics/reward_mean": rewards.mean().item(),
                 "losses/old_approx_kl": old_approx_kl.item(),
                 "losses/approx_kl": approx_kl.item(),
                 "losses/clipfrac": float(np.mean(clipfracs)),
