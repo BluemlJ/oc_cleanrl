@@ -66,7 +66,8 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-
+    version: int = 3
+    
     # Environment parameters
     env_id: str = "ALE/Pong-v5"
     """the id of the environment"""
@@ -126,13 +127,13 @@ class Args:
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
-    clip_coef: float = 0.2
+    clip_coef: float = 0.3
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.00
+    ent_coef: float = 0.01
     """coefficient of the entropy"""
-    vf_coef: float = 0.5
+    vf_coef: float = 0.01
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
@@ -276,14 +277,15 @@ class PPOExpertAdapter(nn.Module):
 
     def forward(self, x):
         with torch.no_grad():
-            x = torch.as_tensor(x, device=self.model.device)
+            x = torch.as_tensor(x, device=self.model.device, dtype=torch.float32)
             if x.dim() == 3:
                 x = x.unsqueeze(0)
-            hidden = self.model.features(x)
+            hidden = self.model.network(x)
             logits = self.model.actor(hidden)
             dist = Categorical(logits=logits)
-            value = self.model.critic(hidden).detach().cpu().item()
+            value = self.model.critic(hidden).squeeze(-1)
         return dist, value
+
 
 
 class RawObservationCache(ObservationWrapper):
@@ -395,13 +397,14 @@ class MoEWrapper(ObservationWrapper):
             for key in self.wrapper_order:     # <- use the fixed order
                 agent = self.agents[key]
                 policy, value = agent(observation[key])
+                if torch.is_tensor(value):
+                    value = float(value.detach().cpu().item())
                 policy_chunks.append(
-                    np.append(policy.probs[0].detach().cpu(
-                    ).numpy().astype(np.float32), value)
+                    np.append(policy.probs[0].detach().cpu().numpy().astype(np.float32), value)
                 )
             policy_vec = np.concatenate(
                 policy_chunks, axis=0).astype(np.float32)
-
+            
         if self.raw_obs_dim == 0:
             # Raw pixels disabled: only feed expert policy probabilities downstream
             return policy_vec
@@ -625,7 +628,7 @@ if __name__ == "__main__":
             dir=wb_dir,
             job_type="train",
             group=f"{args.env_id}",
-            tags=[args.env_id, args.backend, args.obs_mode],
+            tags=[args.env_id, args.backend, args.obs_mode, f"v{args.version}"],
             resume="allow",
         )
         wandb.define_metric("global_step")
@@ -708,8 +711,8 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs = envs.reset()
-    next_obs = torch.Tensor(next_obs).to(device)
-    next_done = torch.zeros(args.num_envs).to(device)
+    next_obs = torch.as_tensor(next_obs, device=device, dtype=torch.float32)
+    next_done = torch.zeros(args.num_envs, device=device, dtype=torch.float32)
 
     if args.track:
         num_params = sum(p.numel() for p in agent.parameters())
@@ -774,11 +777,10 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # Execute the game and store reward, next observation, and done flag
-            next_obs, reward, next_done, infos = envs.step(
-                action.cpu().numpy())
-            rewards[step] = torch.as_tensor(reward, device=device).view(-1)
-            next_obs = torch.as_tensor(next_obs, device=device)
-            next_done = torch.as_tensor(next_done, device=device)
+            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
+            rewards[step] = torch.as_tensor(reward, device=device, dtype=torch.float32).view(-1)
+            next_obs = torch.as_tensor(next_obs, device=device, dtype=torch.float32)
+            next_done = torch.as_tensor(next_done, device=device, dtype=torch.float32)
 
             # Track episode-level statistics if a game is done
             if 1 in next_done:
@@ -811,6 +813,10 @@ if __name__ == "__main__":
                     args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
+        # Advantage diagnostics (to detect vanishing PG signal)
+        adv_mean = advantages.mean().item()
+        adv_std = advantages.std().item()
+        
         # Flatten the batch for optimization
         b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -987,12 +993,16 @@ if __name__ == "__main__":
                 "global_step": global_step,
                 "charts/learning_rate": optimizer.param_groups[0]["lr"],
                 "losses/policy_loss": pg_loss.item(),
-                "losses/entropy": entropy_loss.item(),
+                "losses/entropy": entropy_loss.item()*args.ent_coef,
+                "diagnostics/adv_mean": adv_mean,
+                "diagnostics/adv_std": adv_std,
+                "diagnostics/delta_mean": delta.mean().item(),
+                "diagnostics/delta_std": delta.std().item(),
                 "losses/old_approx_kl": old_approx_kl.item(),
                 "losses/approx_kl": approx_kl.item(),
                 "losses/clipfrac": float(np.mean(clipfracs)),
                 "losses/explained_variance": float(explained_var),
-                "losses/value_loss": v_loss.item(),
+                "losses/value_loss": v_loss.item()*args.vf_coef,
                 "losses/loss_total": loss.item(),
                 "time/SPS": int(global_step / (time.time() - start_time)),
             }

@@ -19,7 +19,7 @@ class PPODefault(Predictor):
 
         dims = envs.observation_space.shape
 
-        self.features = nn.Sequential(
+        self.network = nn.Sequential(
             layer_init(nn.Conv2d(dims[0], 32, 8, stride=4)),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
@@ -28,28 +28,28 @@ class PPODefault(Predictor):
             nn.ReLU()
         )
 
-        if normalize:  # x / 255
-            self.features.insert(0, NormalizeImg())
+        #if normalize:  # x / 255
+        #    self.network.insert(0, NormalizeImg())
 
-        self.features.append(nn.Flatten())
+        self.network.append(nn.Flatten())
         
         # compute flatten size with a dummy forward
         # makes the agent applicable for any input image size
         with torch.no_grad():
-            f = self.features(torch.zeros((1,) + dims))
+            f = self.network(torch.zeros((1,) + dims))
             feat_dim = f.flatten().shape[0]
 
-        self.features.append(layer_init(nn.Linear(feat_dim, 512)))
-        self.features.append(nn.ReLU())
+        self.network.append(layer_init(nn.Linear(feat_dim, 512)))
+        self.network.append(nn.ReLU())
         
         self.actor = layer_init(nn.Linear(512, envs.action_space.n), std=0.01)
         self.critic = layer_init(nn.Linear(512, 1), std=1)
     
     def get_value(self, x):
-        return self.critic(self.features(x))
+        return self.critic(self.network(x))
 
     def get_action_and_value(self, x, action=None):
-        z = self.features(x)
+        z = self.network(x)
         logits = self.actor(z)
         probs = Categorical(logits=logits)
         if action is None:
