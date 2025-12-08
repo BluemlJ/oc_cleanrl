@@ -6,6 +6,12 @@ from torch.distributions.categorical import Categorical
 from .common import Predictor, layer_init, NormalizeImg
 
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    nn.init.orthogonal_(layer.weight, std)
+    if layer.bias is not None:
+        nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 class PPODefault(Predictor):
     def __init__(self, envs, device, normalize=True):
         super().__init__()
