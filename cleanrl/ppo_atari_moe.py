@@ -30,7 +30,8 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
-from architectures.common import layer_init, NormalizeImg
+from architectures.moe import MoEAgent
+from architectures.ppo import PPODefault
 
 import ocatari_wrappers
 
@@ -173,7 +174,8 @@ class Args:
     """coefficient for load-balancing auxiliary loss on expert usage"""
     topk_steps: float = 10_000_000
     """fraction of training after which we enable hard top-1 routing at action time"""
-
+    moe_log_interval: int = 10
+    """log expensive MoE diagnostics every N iterations"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -185,15 +187,16 @@ class Args:
 
 
 agent_mapping = {
-            "plane_masks": "ppo_occam_planes",
-            "class_masks": "ppo_occam_classes",
-            "binary_masks": "ppo_occam_binary",
-            "object_masks": "ppo_occam_pixels",
-            # "pixel_planes": "ppo_occam_pixel_planes",  # todo
-            # "big_planes": "ppo_occam_parallel_planes",  # todo
-            "dqn": "pixel_ppo",
-            #"obj": "obj_ppo_large",
-        }
+    "plane_masks": "ppo_occam_planes",
+    "class_masks": "ppo_occam_classes",
+    "binary_masks": "ppo_occam_binary",
+    "object_masks": "ppo_occam_pixels",
+    # "pixel_planes": "ppo_occam_pixel_planes",  # todo
+    # "big_planes": "ppo_occam_parallel_planes",  # todo
+    "dqn": "pixel_ppo",
+    # "obj": "obj_ppo_large",
+}
+
 
 @torch.no_grad()
 def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
@@ -215,7 +218,8 @@ def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
     mix = mix / mix.sum(dim=1, keepdim=True)
 
     # recompute via categorical produced by the model (should match `mix`)
-    cat, _, _ = agent._weighted_distribution(hidden, x, epsilon=0.0, top_k=False)
+    cat, _, _ = agent._weighted_distribution(
+        hidden, x, epsilon=0.0, top_k=False)
     model_mix = cat.probs
     diff = (mix - model_mix).abs().max().item()
 
@@ -226,22 +230,25 @@ def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
     if mask.any():
         top_exp = experts[mask, idx[mask], :].clamp_min(1e-8)
         sel_mix = mix[mask].clamp_min(1e-8)
-        kl_top = (sel_mix * (sel_mix.log() - top_exp.log())).sum(dim=1).mean().item()
+        kl_top = (sel_mix * (sel_mix.log() - top_exp.log())
+                  ).sum(dim=1).mean().item()
 
     if verbose:
-        print(f"[check_mixing] max |mix - model_mix| = {diff:.3e}, KL(mix||top)={kl_top}")
+        print(
+            f"[check_mixing] max |mix - model_mix| = {diff:.3e}, KL(mix||top)={kl_top}")
     return diff, kl_top
 
 
 def _sanitize(name: str) -> str:
     """Turn wrapper name into a safe tag for W&B keys/plots."""
     return (
-    name.replace("/", "_")
-    .replace(" ", "_")
-    .replace(".", "_")
-    .replace("|", "_")
+        name.replace("/", "_")
+        .replace(" ", "_")
+        .replace(".", "_")
+        .replace("|", "_")
     )
-    
+
+
 def load_agent(env, model_dir, game_name, wrapper, target_device):
     """Load a saved CleanRL PPO agent for a given OCAtari wrapper."""
     ckpt = torch.load(
@@ -249,56 +256,34 @@ def load_agent(env, model_dir, game_name, wrapper, target_device):
         map_location=target_device,
         weights_only=False,
     )
-    ppo_agent = PPOAgent(env, target_device).to(target_device)
-    ppo_agent.load_state_dict(ckpt["model_weights"])
-    ppo_agent.eval()
+    base = PPODefault(env, target_device, normalize=True).to(target_device)
+    base.load_state_dict(ckpt["model_weights"])
+    base.eval()
+    ppo_agent = PPOExpertAdapter(base)
 
     return ppo_agent
 
 
+class PPOExpertAdapter(nn.Module):
+    """
+    Thin wrapper to give PPODefault the `(obs_np) -> (Categorical, value)` interface
+    expected by the MoE wrapper.
+    """
 
-class PPOAgent(nn.Module):
-    """Convolutional policy used by the individual expert checkpoints."""
-
-    def __init__(self, env, device):
-        """Initialise the expert network architecture and preprocessing."""
+    def __init__(self, model: PPODefault):
         super().__init__()
-
-        dims = env.observation_space.shape
-        self.device = device
-
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(dims[0], 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU()
-        )
-
-        self.norm_img = NormalizeImg()
-
-        self.network.append(nn.Flatten())
-
-        # compute flatten size with a dummy forward
-        # makes the agent applicable for any input image size
-        with torch.no_grad():
-            f = self.network(torch.zeros((1,) + dims))
-            feat_dim = f.flatten().shape[0]
-
-        self.network.append(layer_init(nn.Linear(feat_dim, 512)))
-        self.network.append(nn.ReLU())
-
-        self.actor = layer_init(nn.Linear(512, env.action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
+        self.model = model
 
     def forward(self, x):
-        """Return the action distribution and value for an individual wrapper observation."""
-        x = torch.from_numpy(self.norm_img(
-            x)).float().unsqueeze(0).to(self.device)
-        hidden = self.network(x)
-        logits = self.actor(hidden)
-        return Categorical(logits=logits), self.critic(hidden).detach().cpu().item()
+        with torch.no_grad():
+            x = torch.as_tensor(x, device=self.model.device)
+            if x.dim() == 3:
+                x = x.unsqueeze(0)
+            hidden = self.model.features(x)
+            logits = self.model.actor(hidden)
+            dist = Categorical(logits=logits)
+            value = self.model.critic(hidden).detach().cpu().item()
+        return dist, value
 
 
 class RawObservationCache(ObservationWrapper):
@@ -313,6 +298,7 @@ class RawObservationCache(ObservationWrapper):
         self.last_raw_observation = observation
         return observation
 
+
 @torch.no_grad()
 def evaluate_expert(model_dir, env_fn, wrapper_key: str, episodes: int, device: torch.device):
     """
@@ -321,7 +307,8 @@ def evaluate_expert(model_dir, env_fn, wrapper_key: str, episodes: int, device: 
     """
     env = env_fn()
     # load expert for this specific wrapper
-    expert = load_agent(env.wrappers[wrapper_key], model_dir, env.unwrapped.game_name, wrapper_key, device).to(device)
+    expert = load_agent(env.wrappers[wrapper_key], model_dir,
+                        env.unwrapped.game_name, wrapper_key, device).to(device)
     returns = []
     obs, _ = env.reset()
     ep_ret = 0.0
@@ -351,7 +338,8 @@ class MoEWrapper(ObservationWrapper):
         super().__init__(env)  # <-- move super() early
 
         # device first
-        self.device = target_device if isinstance(target_device, torch.device) else torch.device(target_device)
+        self.device = target_device if isinstance(
+            target_device, torch.device) else torch.device(target_device)
 
         # stable, explicit wrapper order
         self.wrapper_order = list(getattr(args, "moe_wrappers", ()))
@@ -360,7 +348,8 @@ class MoEWrapper(ObservationWrapper):
 
         # load experts **once** in the explicit order
         self.agents = {
-            w: load_agent(self.env.wrappers[w], model_dir, self.env.unwrapped.game_name, w, self.device)
+            w: load_agent(
+                self.env.wrappers[w], model_dir, self.env.unwrapped.game_name, w, self.device)
             for w in self.wrapper_order
         }
 
@@ -379,7 +368,8 @@ class MoEWrapper(ObservationWrapper):
                 encoded = self._encode_raw_observation(dummy_obs)
                 self.raw_obs_dim = encoded.size
                 self.encoded_raw_hw = self.target_hw
-                self._empty_raw_flat = np.zeros(self.raw_obs_dim, dtype=np.float32)
+                self._empty_raw_flat = np.zeros(
+                    self.raw_obs_dim, dtype=np.float32)
             else:
                 self.raw_obs_shape = ()
                 self.raw_obs_dim = 0
@@ -406,16 +396,19 @@ class MoEWrapper(ObservationWrapper):
                 agent = self.agents[key]
                 policy, value = agent(observation[key])
                 policy_chunks.append(
-                    np.append(policy.probs[0].detach().cpu().numpy().astype(np.float32), value)
+                    np.append(policy.probs[0].detach().cpu(
+                    ).numpy().astype(np.float32), value)
                 )
-            policy_vec = np.concatenate(policy_chunks, axis=0).astype(np.float32)
+            policy_vec = np.concatenate(
+                policy_chunks, axis=0).astype(np.float32)
 
         if self.raw_obs_dim == 0:
             # Raw pixels disabled: only feed expert policy probabilities downstream
             return policy_vec
 
         # also add the flattened image
-        raw_obs = self.env.last_raw_observation  # todo why not use the grayscale and downsample directly?
+        # todo why not use the grayscale and downsample directly?
+        raw_obs = self.env.last_raw_observation
         if raw_obs is None:
             raw_flat = self._empty_raw_flat
         else:
@@ -467,216 +460,6 @@ class MoEWrapper(ObservationWrapper):
         arr = arr.reshape(target_h, block_h, target_w, block_w)
         arr = arr.mean(axis=(1, 3))
         return arr.reshape(-1)
-
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.xavier_normal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class MoEAgent(nn.Module):
-    """Policy/value network that learns to fuse expert policies (plus optional pixels)."""
-
-    def __init__(self, envs, device, layer_dims=(128, 64), weighted_sum=True, include_policies=True, top_k=None, include_value_in_policy_input=False):
-        """Build the MoE controller with configurable hidden layers and fusion mode."""
-        super().__init__()
-        self.device = device
-
-        base_env = envs
-        while hasattr(base_env, "venv"):
-            base_env = base_env.venv
-        self.action_dim = base_env.get_attr("action_dim")[0]  # = expert policy length
-        self.num_experts = base_env.get_attr("num_experts")[0]
-        self.expert_feature_dim = base_env.get_attr("expert_feature_dim")[0]  # = (#actions + 1) * #experts
-        self.raw_obs_dim = base_env.get_attr("raw_obs_dim")[0]  # length of flat image
-        self.encoded_raw_hw = base_env.get_attr("encoded_raw_hw")[0]  # actual image size
-
-        if include_value_in_policy_input:
-            self.policy_input_dim = self.expert_feature_dim
-        else:
-            self.policy_input_dim = self.expert_feature_dim - self.num_experts
-
-        self.per_expert_dim = self.policy_input_dim // self.num_experts
-
-        self.include_policies = include_policies
-        self.include_pixels = self.raw_obs_dim > 0 and self.encoded_raw_hw is not None
-        self.top_k = top_k
-
-        assert self.include_policies or self.include_pixels
-
-        self.wrapper_names = list(args.moe_wrappers)
-        
-        if include_policies:
-            policy_hidden_dim = layer_dims[0] if len(layer_dims) > 0 else 128
-            # Branch that reasons over expert policy outputs
-            self.policy_branch = nn.Sequential(
-                layer_init(nn.Linear(self.policy_input_dim, policy_hidden_dim)),
-                nn.ReLU(),
-            )
-        else:
-            policy_hidden_dim = 0
-
-            # Optional branch encoding the low-resolution pixel grid
-        if self.include_pixels:
-            raw_h, raw_w = self.encoded_raw_hw
-            self.raw_branch = nn.Sequential(
-                layer_init(
-                    nn.Conv2d(1, 8, kernel_size=3, stride=2, padding=1)),
-                nn.ReLU(),
-                layer_init(
-                    nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1)),
-                nn.ReLU(),
-                nn.Flatten(),
-            )
-            conv_out_h = raw_h // 4
-            conv_out_w = raw_w // 4
-            conv_out_dim = 16 * conv_out_h * conv_out_w
-            raw_hidden_dim = max(policy_hidden_dim, 16)
-            self.raw_project = nn.Sequential(
-                layer_init(nn.Linear(conv_out_dim, raw_hidden_dim)),
-                nn.ReLU(),
-            )
-        else:
-            self.raw_branch = None
-            self.raw_project = None
-            raw_hidden_dim = 0
-
-        # Fuse both branches (if present) and optionally stack more MLP layers
-        fusion_input_dim = policy_hidden_dim + raw_hidden_dim
-        fusion_layers: list[nn.Module] = []
-        current_dim = fusion_input_dim
-        for hidden_dim in layer_dims[1:]:
-            fusion_layers.append(layer_init(
-                nn.Linear(current_dim, hidden_dim)))
-            fusion_layers.append(nn.ReLU())
-            current_dim = hidden_dim
-        self.fusion_network = nn.Sequential(
-            *fusion_layers) if fusion_layers else nn.Identity()
-        feature_dim = current_dim if fusion_layers else fusion_input_dim
-
-        if weighted_sum:
-            output_dim = self.num_experts
-            self.weighted_sum = True
-        else:
-            output_dim = self.action_dim
-            self.weighted_sum = False
-
-        self.actor = layer_init(nn.Linear(feature_dim, output_dim), std=0.01)
-        self.critic = layer_init(nn.Linear(feature_dim, 1), std=1)
-
-    def _forward_features(self, x):
-        if self.include_policies:
-            policy_value_part = x[:, :self.expert_feature_dim]  # (B, #experts * [#actions + #experts])
-            experts_and_values = policy_value_part.reshape(x.size(0), self.num_experts, self.action_dim + 1)  # +1 for the value
-            input_features = torch.clamp(experts_and_values[..., :self.per_expert_dim], min=1e-8)  # strip the values if necessary
-
-            features = self.policy_branch(input_features.reshape(x.size(0), -1))
-        if self.include_pixels:
-            raw_part = x[:, self.expert_feature_dim:]
-            raw_h, raw_w = self.encoded_raw_hw
-            raw_img = raw_part.view(x.size(0), 1, raw_h, raw_w)
-            raw_features = self.raw_branch(raw_img)
-            raw_features = self.raw_project(raw_features)
-            if self.include_policies:
-                features = torch.cat((features, raw_features), dim=1)  # noqa: can't be undefined
-            else:
-                features = raw_features
-
-        return self.fusion_network(features)  # noqa: only undefined if both False, crashes earlier
-
-    # def get_value(self, x):
-    #     """Estimate the value function for PPO updates."""
-    #     hidden = self._forward_features(x)
-    #     if self.weighted_sum:
-    #         # use the mixed value
-    #         _, value, mixed_weights = self._weighted_distribution(
-    #             hidden, x, 0.0
-    #         )
-    #     else:
-    #         raise NotImplementedError  # todo maybe just train a critic in this case
-    #     return value
-    
-    def get_value(self, x):
-        hidden = self._forward_features(x)
-        return self.critic(hidden).squeeze(-1)
-
-
-    def _direct_distribution(self, hidden):
-        """Return a categorical distribution directly from the actor head."""
-        logits = self.actor(hidden)
-        return Categorical(logits=logits)
-
-    def _weighted_distribution(self, hidden, x, epsilon: float = 0.0, top_k=False):
-        # gate
-        weights = torch.softmax(self.actor(hidden), dim=1)  # (B, #experts)
-
-        # epsilon smoothing for exploration (optional)
-        if epsilon > 0.0:
-            weights = weights + epsilon * torch.rand_like(weights)
-            weights = weights.clamp_min(1e-8)
-            weights = weights / weights.sum(dim=1, keepdim=True)  # re-normalize
-
-        policy_value_part = x[:, :self.expert_feature_dim]  # (B, #experts * [#actions + #experts])
-        experts_and_values = policy_value_part.reshape(x.size(0), self.num_experts, self.action_dim + 1)  # +1 for the value
-        values = experts_and_values[..., -1]  # last entry is the value produced by the expert
-        experts = torch.clamp(experts_and_values[..., :-1], min=1e-8)  # rest is the policy
-
-        experts = experts / experts.sum(dim=2, keepdim=True)  # re-normalize
-
-       # top k
-        if top_k:
-            weights, indices = torch.topk(weights, self.top_k, dim=1)  # both (B, k)
-            experts = torch.gather(experts, 1, indices.unsqueeze(-1).expand(-1, -1, experts.size(-1)))  # (B, k, #actions)
-            values = torch.gather(values, 1, indices)  # (B, k)
-
-            weights = weights / weights.sum(dim=1, keepdim=True)  # re-normalize
-
-        mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)  # (B, #actions)
-
-        # use unweighted mean to prevent advantage cheating
-        mixed_values = values.mean(dim=1)  # (B,)
-        # mixed_values = torch.sum(values * weights, dim=1)  # (B,)
-
-
-        return Categorical(probs=mixed_probs), mixed_values.detach(), weights
-
-
-    def current_epsilon(self, global_step: int, eps_start: float, eps_end: float, eps_decay_steps: int) -> float:
-        """Linear decay of epsilon w.r.t. env steps."""
-        # progress = min(1.0, global_step / eps_decay_steps)
-        # eps = eps_start + progress * (eps_end - eps_start)
-        # We clamp so it never goes below eps_end or above eps_start.
-        if eps_decay_steps <= 0:
-            return eps_end
-        progress = float(global_step) / float(eps_decay_steps)
-        if progress > 1.0:
-            progress = 1.0
-        return eps_start + progress * (eps_end - eps_start)
-
-    def get_mixture_weights(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Returns the per-expert mixture weights for a batch of inputs x.
-        Shape: [B, num_experts]. Only valid when weighted_sum=True.
-        """
-        assert self.weighted_sum, "Mixture weights only exist when weighted_sum=True"
-        with torch.no_grad():
-            hidden = self._forward_features(x)
-            weights = torch.softmax(self.actor(hidden), dim=1)
-        return weights
-
-    def get_action_and_value(self, x, action=None, epsilon: float = 0.0, top_k=False):
-        hidden = self._forward_features(x)
-        if self.weighted_sum:
-            categorical, _, mixed_weights = self._weighted_distribution(hidden, x, epsilon, top_k=top_k)
-        else:
-            categorical = self._direct_distribution(hidden)
-            mixed_weights = None
-        if action is None:
-            action = categorical.sample()
-        value = self.critic(hidden).squeeze(-1)
-        return action, categorical.log_prob(action), categorical.entropy(), value, mixed_weights
-
 
 
 # Global variable to hold parsed arguments
@@ -738,7 +521,8 @@ def make_env(env_id, idx, capture_video, run_dir, target_device):
         wrapper_device = torch.device(target_device)
         if args.include_raw_obs:
             env = RawObservationCache(env)
-        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=args.moe_wrappers)
+        env = ocatari_wrappers.MultiOCCAMWrapper(
+            env, wrappers=args.moe_wrappers)
         # Replace observation with concatenated expert policies (and optional pixels)
         env = MoEWrapper(
             env,
@@ -751,6 +535,7 @@ def make_env(env_id, idx, capture_video, run_dir, target_device):
         return env
 
     return thunk
+
 
 def make_base_env(env_id, capture_video, run_dir):
     """
@@ -786,7 +571,8 @@ def make_base_env(env_id, capture_video, run_dir):
                 repeat_action_probability=0.25
             )
         elif args.backend == "Gym":
-            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
+            env = gym.make(env_id, render_mode="rgb_array",
+                           frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
             env = gym.wrappers.FrameStack(env, args.buffer_window_size)
@@ -794,7 +580,8 @@ def make_base_env(env_id, capture_video, run_dir):
             raise ValueError("Unknown Backend")
 
         if capture_video:
-            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos_experts", disable_logger=True)
+            env = gym.wrappers.RecordVideo(
+                env, f"{run_dir}/media/videos_experts", disable_logger=True)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
@@ -802,13 +589,15 @@ def make_base_env(env_id, capture_video, run_dir):
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        #if args.include_raw_obs:
+        # if args.include_raw_obs:
         #    env = RawObservationCache(env)
 
         # dict obs with one entry per OCCAM wrapper
-        env = ocatari_wrappers.MultiOCCAMWrapper(env, wrappers=args.moe_wrappers)
+        env = ocatari_wrappers.MultiOCCAMWrapper(
+            env, wrappers=args.moe_wrappers)
         return env
     return thunk
+
 
 if __name__ == "__main__":
     # Parse command-line arguments using Tyro
@@ -819,10 +608,11 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     # Generate run name based on environment, experiment, seed, and timestamp
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    
+
     # Initialize tracking with Weights and Biases if enabled
     if args.track:
-        import dataclasses, wandb
+        import dataclasses
+        import wandb
 
         wb_dir = args.wandb_dir or str(Path("runs") / run_name)
         run = wandb.init(
@@ -848,9 +638,6 @@ if __name__ == "__main__":
     else:
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
-        
-
-
 
     # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
     writer = SummaryWriter(writer_dir)
@@ -894,8 +681,15 @@ if __name__ == "__main__":
     envs.seed(args.seed)
     envs.action_space.seed(args.seed)
 
-    agent = MoEAgent(envs, device, args.layer_dims, include_policies=args.include_policies,
-                     top_k=args.sparse_moe_k, include_value_in_policy_input=args.include_values).to(device)
+    agent = MoEAgent(
+        envs,
+        device,
+        args.layer_dims,
+        include_policies=args.include_policies,
+        top_k=args.sparse_moe_k,
+        include_value_in_policy_input=args.include_values,
+    ).to(device)
+    agent.wrapper_names = list(args.moe_wrappers)
 
     # Initialize optimizer for training
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -921,7 +715,7 @@ if __name__ == "__main__":
         num_params = sum(p.numel() for p in agent.parameters())
         wandb.summary["params_total"] = num_params
         wandb.watch(agent, log="gradients", log_freq=1000, log_graph=False)
-        
+
     # Start the RTPT tracking
     rtpt.start()
 
@@ -955,23 +749,24 @@ if __name__ == "__main__":
                 name = f"{args.exp_name}_s{args.seed}"
                 run.log_model(model_path, name)  # noqa: cannot be undefined
 
+        eps_now_iter = agent.current_epsilon(
+            global_step=global_step,
+            eps_start=args.eps_start,
+            eps_end=args.eps_end,
+            eps_decay_steps=args.eps_decay_steps,
+        )
+        log_moe_now = (iteration % args.moe_log_interval == 0)
+
         # Perform rollout in each environment
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
 
-            eps_now = agent.current_epsilon(
-                global_step=global_step,
-                eps_start=args.eps_start,
-                eps_end=args.eps_end,
-                eps_decay_steps=args.eps_decay_steps,
-            )
-
-                
             with torch.no_grad():
                 action, logprob, _, value, _ = agent.get_action_and_value(
-                    next_obs, epsilon=eps_now, top_k=(global_step >= args.topk_steps)
+                    next_obs, epsilon=eps_now_iter, top_k=(
+                        global_step >= args.topk_steps)
                 )
                 values[step] = value  # shape: [num_envs]
 
@@ -981,9 +776,9 @@ if __name__ == "__main__":
             # Execute the game and store reward, next observation, and done flag
             next_obs, reward, next_done, infos = envs.step(
                 action.cpu().numpy())
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(
-                device), torch.Tensor(next_done).to(device)
+            rewards[step] = torch.as_tensor(reward, device=device).view(-1)
+            next_obs = torch.as_tensor(next_obs, device=device)
+            next_done = torch.as_tensor(next_done, device=device)
 
             # Track episode-level statistics if a game is done
             if 1 in next_done:
@@ -1036,7 +831,7 @@ if __name__ == "__main__":
                 _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(
                     b_obs[mb_inds],
                     b_actions.long()[mb_inds],
-                    epsilon=eps_now,
+                    epsilon=eps_now_iter,
                     top_k=False,
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
@@ -1061,7 +856,7 @@ if __name__ == "__main__":
                     torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                #Value loss
+                # Value loss
                 newvalue = newvalue.view(-1)
                 if args.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
@@ -1070,10 +865,11 @@ if __name__ == "__main__":
                         -args.clip_coef, args.clip_coef,
                     )
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    v_loss = 0.5 * \
+                        torch.max(v_loss_unclipped, v_loss_clipped).mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
+                    v_loss = 0.5 * \
+                        ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 # Load-balancing loss (encourage all experts to get some traffic)
                 if mixed_weights_train is not None:
@@ -1094,7 +890,7 @@ if __name__ == "__main__":
 
                 # Entropy loss (for exploration)
                 entropy_loss = entropy.mean()
-                
+
                 # PPO total loss + load balance penalty
                 loss = (
                     pg_loss
@@ -1102,7 +898,6 @@ if __name__ == "__main__":
                     + v_loss * args.vf_coef
                     + args.lb_coeff * lb_loss
                 )
-
 
                 # Backpropagation and optimizer step
                 optimizer.zero_grad()
@@ -1135,41 +930,52 @@ if __name__ == "__main__":
         w = None
         w_mean = None
         w_entropy = None
-        if agent.weighted_sum:
+        entropy_raw = None
+        entropy_blend = None
+        if agent.weighted_sum and log_moe_now:
             with torch.no_grad():
                 sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
                 sample_size = min(2048, sample_obs.size(0))
-                idx = torch.randint(0, sample_obs.size(0), (sample_size,), device=sample_obs.device)
+                idx = torch.randint(0, sample_obs.size(
+                    0), (sample_size,), device=sample_obs.device)
                 w = agent.get_mixture_weights(sample_obs[idx])     # [B, E]
                 w_mean = w.mean(dim=0).detach().cpu().numpy()      # [E]
-                w = agent.get_mixture_weights(sample_obs[idx])  # [B, E], raw gate p
+                w = agent.get_mixture_weights(
+                    sample_obs[idx])  # [B, E], raw gate p
                 uniform = torch.ones_like(w) / w.size(1)
-                w_blend = (1 - eps_now) * w + eps_now * uniform  # p_final
+                w_blend = (1 - eps_now_iter) * w + \
+                    eps_now_iter * uniform  # p_final
 
                 # entropies
-                entropy_raw = (-(w.clamp_min(1e-8) * w.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
-                entropy_blend = (-(w_blend.clamp_min(1e-8) * w_blend.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
+                entropy_raw = (-(w.clamp_min(1e-8) *
+                               w.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
+                entropy_blend = (-(w_blend.clamp_min(1e-8) *
+                                 w_blend.clamp_min(1e-8).log()).sum(dim=1)).mean().item()
 
-
-        # (optional) KL diagnostics every 50 iters
-        if args.track and agent.weighted_sum and iteration % 10 == 0:
+        # (optional) KL diagnostics every few iters
+        if args.track and agent.weighted_sum and log_moe_now and w is not None:
             with torch.no_grad():
                 x = sample_obs[idx[:min(512, sample_size)]]
-                weights = agent.get_mixture_weights(x)                       # [B,E]
-                experts = x[:, :agent.expert_feature_dim].reshape(x.size(0), agent.num_experts, -1)[..., :agent.action_dim]
-                mixed = (weights.unsqueeze(-1) * experts).sum(dim=1).clamp_min(1e-8)
+                weights = agent.get_mixture_weights(
+                    x)                       # [B,E]
+                experts = x[:, :agent.expert_feature_dim].reshape(
+                    x.size(0), agent.num_experts, -1)[..., :agent.action_dim]
+                mixed = (weights.unsqueeze(-1) *
+                         experts).sum(dim=1).clamp_min(1e-8)
                 mixed = mixed / mixed.sum(dim=1, keepdim=True)
                 kl_per_expert = []
                 log_mixed = mixed.log()
                 for i in range(agent.num_experts):
                     p_i = experts[:, i, :].clamp_min(1e-8)
                     p_i = p_i / p_i.sum(dim=1, keepdim=True)
-                    kl = (mixed * (log_mixed - p_i.log())).sum(dim=1).mean().item()
+                    kl = (mixed * (log_mixed - p_i.log())
+                          ).sum(dim=1).mean().item()
                     kl_per_expert.append(kl)
             import wandb
             for i, kl in enumerate(kl_per_expert):
                 name = _sanitize(agent.wrapper_names[i])
-                wandb.log({f"moe/KL_mixed_to_expert_{name}": kl}, step=global_step)
+                wandb.log({f"moe/KL_mixed_to_expert_{name}": kl},
+                          step=global_step)
 
         # --- RTPT tick ---------------------------------------------------------------
         rtpt.step()
@@ -1186,6 +992,8 @@ if __name__ == "__main__":
                 "losses/approx_kl": approx_kl.item(),
                 "losses/clipfrac": float(np.mean(clipfracs)),
                 "losses/explained_variance": float(explained_var),
+                "losses/value_loss": v_loss.item(),
+                "losses/loss_total": loss.item(),
                 "time/SPS": int(global_step / (time.time() - start_time)),
             }
             if count > 0:
@@ -1193,8 +1001,12 @@ if __name__ == "__main__":
                     log_payload["charts/Episodic_New_Reward"] = enewr / count
                 log_payload["charts/Episodic_Original_Reward"] = eorgr / count
                 log_payload["charts/Episodic_Length"] = elength / count
-            
-            import wandb, shutil, psutil, subprocess, json
+
+            import wandb
+            import shutil
+            import psutil
+            import subprocess
+            import json
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory().used / 1e9
             disk_free = shutil.disk_usage(writer_dir).free / 1e9
@@ -1218,45 +1030,54 @@ if __name__ == "__main__":
                     pass
 
             # Append MoE diagnostics (if available)
-            if agent.weighted_sum:
-                log_payload["moe/weights_entropy_raw"] = entropy_raw        # gate's true belief
-                log_payload["moe/weights_entropy_eps_sorblend"] = entropy_blend    # what was actually used
-                log_payload["moe/epsilon"] = float(eps_now)
+            if agent.weighted_sum and w_mean is not None:
+                # gate's true belief
+                if entropy_raw is not None:
+                    log_payload["moe/weights_entropy_raw"] = entropy_raw
+                if entropy_blend is not None:
+                    log_payload["moe/weights_entropy_eps_sorblend"] = entropy_blend
+                log_payload["moe/epsilon"] = float(eps_now_iter)
                 for e_idx, val in enumerate(w_mean):
                     name = _sanitize(agent.wrapper_names[e_idx])
                     log_payload[f"moe/weight_mean_{name}"] = float(val)
-                if iteration % 10 == 0 and w is not None:
+                if log_moe_now and w is not None:
                     # each logging step
                     for e_idx, val in enumerate(w_mean):
                         name = _sanitize(agent.wrapper_names[e_idx])
-                        weights_table.add_data(int(global_step), name, float(val))
-                        
-                log_payload["moe/load_balance_loss"] = float(last_lb_loss.item())
+                        weights_table.add_data(
+                            int(global_step), name, float(val))
+
+                log_payload["moe/load_balance_loss"] = float(
+                    last_lb_loss.item())
 
                 if last_freq is not None:
                     for e_idx, val in enumerate(last_freq.cpu().numpy()):
                         name = _sanitize(agent.wrapper_names[e_idx])
-                        log_payload[f"moe/batch_usage_frac_{name}"] = float(val)
+                        log_payload[f"moe/batch_usage_frac_{name}"] = float(
+                            val)
 
-            bar_table = wandb.Table(columns=["expert", "weight"])
-            for e_idx, val in enumerate(w_mean):
-                name = _sanitize(agent.wrapper_names[e_idx])
-                bar_table.add_data(name, float(val))
+            if w_mean is not None:
+                bar_table = wandb.Table(columns=["expert", "weight"])
+                for e_idx, val in enumerate(w_mean):
+                    name = _sanitize(agent.wrapper_names[e_idx])
+                    bar_table.add_data(name, float(val))
 
-            #wandb.log({
+            # wandb.log({
             #    "moe/weights_bar": wandb.plot.bar(
             #        bar_table, "expert", "weight", title="MoE mean weights (this step)"
             #    )
-            #}, step=global_step)
+            # }, step=global_step)
             wandb.log(log_payload, step=global_step)
-            
+
             if iteration % 100 == 0:
                 sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
-                idx = torch.randint(0, sample_obs.size(0), (512,), device=sample_obs.device)
+                idx = torch.randint(0, sample_obs.size(
+                    0), (512,), device=sample_obs.device)
                 dmax, kl_top = check_mixing(agent, sample_obs[idx])
                 if args.track:
-                    wandb.log({"moe/mix_diff_max": dmax, "moe/kl_mix_to_top_if_conf": (kl_top or 0.0)}, step=global_step)
-                
+                    wandb.log(
+                        {"moe/mix_diff_max": dmax, "moe/kl_mix_to_top_if_conf": (kl_top or 0.0)}, step=global_step)
+
     # --- End of training loop --------------------------------------------------------
 
     name = f"{args.exp_name}_s{args.seed}".replace("+", "_")
@@ -1311,19 +1132,23 @@ if __name__ == "__main__":
             expert_returns = {}
             base_env_fn = make_base_env(args.env_id, False, writer_dir)
             for wrapper_key in args.moe_wrappers:
-                rets = evaluate_expert(args.model_dir, base_env_fn, wrapper_key, episodes=5, device=device)
+                rets = evaluate_expert(
+                    args.model_dir, base_env_fn, wrapper_key, episodes=5, device=device)
                 expert_returns[wrapper_key] = rets
 
             # Log as a wandb.Table
             rows = []
             for k, rets in expert_returns.items():
-                rows.append([k, float(np.mean(rets)), float(np.std(rets)), int(len(rets))])
-            expert_table = wandb.Table(data=rows, columns=["expert", "mean_return", "std_return", "n_episodes"])
+                rows.append([k, float(np.mean(rets)), float(
+                    np.std(rets)), int(len(rets))])
+            expert_table = wandb.Table(
+                data=rows, columns=["expert", "mean_return", "std_return", "n_episodes"])
             wandb.log({"eval/experts_table": expert_table})
 
             # Quick scalar conveniences
             for k, rets in expert_returns.items():
-                wandb.log({f"eval/expert/{k}/mean_return": float(np.mean(rets))})
+                wandb.log(
+                    {f"eval/expert/{k}/mean_return": float(np.mean(rets))})
 
         wandb.finish()
 

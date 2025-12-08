@@ -30,7 +30,7 @@ class PPODefault(Predictor):
         # compute flatten size with a dummy forward
         # makes the agent applicable for any input image size
         with torch.no_grad():
-            f = self.features(torch.zeros(dims))
+            f = self.features(torch.zeros((1,) + dims))
             feat_dim = f.flatten().shape[0]
 
         self.features.append(layer_init(nn.Linear(feat_dim, 512)))
