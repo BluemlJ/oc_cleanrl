@@ -593,9 +593,14 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                loss = pg_loss \
+                - args.ent_coef * entropy_loss \
+                + v_loss * args.vf_coef
 
-                optimizer.zero_grad()
+                #optimizer.zero_grad()
+                for param in agent.parameters():
+                    param.grad = None
+                    
                 loss.backward()
                 gn = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
