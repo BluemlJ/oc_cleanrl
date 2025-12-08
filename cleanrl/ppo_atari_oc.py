@@ -108,9 +108,9 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author: str = "JD"
+    author: str = "JB"
     """Initials of the author"""
-    checkpoint_interval: int = 40
+    checkpoint_interval: int = 1_000_000
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
@@ -628,6 +628,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", float(np.mean(clipfracs)), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        writer.add_scalar("losses/loss", loss.item(), global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
         # W&B enrichments
@@ -643,6 +644,7 @@ if __name__ == "__main__":
                 "losses/approx_kl": approx_kl.item(),
                 "losses/clipfrac": float(np.mean(clipfracs)),
                 "losses/explained_variance": float(explained_var),
+                "losses/loss": loss.item(),
                 "time/SPS": int(global_step / (time.time() - start_time)),
             }
             if count > 0:
