@@ -35,6 +35,8 @@ from architectures.ppo import PPODefault
 
 import ocatari_wrappers
 
+from cleanrl.architectures.loading import init_agent
+
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -164,19 +166,25 @@ class Args:
     sparse_moe_k: int = None
     """Number of experts to consider at a time (top k)"""
 
-    # Expert mixing epsilon parameters
-    eps_start: float = 0.5
-    """initial epsilon for expert mixing (more uniform routing early)"""
-    eps_end: float = 0.0
-    """final epsilon for expert mixing (pure learned routing late)"""
-    eps_decay_steps: int = 000
-    """how many environment steps to decay epsilon over"""
+    # Expert mixing parameters
+    tau_start: float = 0.5
+    """initial tau for expert mixing (more uniform routing early)"""
+    tau_end: float = 0.0
+    """final tau for expert mixing (pure learned routing late)"""
+    tau_decay_steps: int = 000
+    """how many environment steps to decay tau over"""
     lb_coeff: float = 0
     """coefficient for load-balancing auxiliary loss on expert usage"""
     topk_steps: float = 10_000_000
     """fraction of training after which we enable hard top-1 routing at action time"""
     moe_log_interval: int = 10
     """log expensive MoE diagnostics every N iterations"""
+    temp_start: float = 0.5
+    """initial temperature for expert mixing (more uniform routing early)"""
+    temp_end: float = 0.0
+    """final temperature for expert mixing (pure learned routing late)"""
+    temp_decay_steps: int = 000
+    """how many environment steps to decay temperature over"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -219,8 +227,7 @@ def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
     mix = mix / mix.sum(dim=1, keepdim=True)
 
     # recompute via categorical produced by the model (should match `mix`)
-    cat, _, _ = agent._weighted_distribution(
-        hidden, x, epsilon=0.0, top_k=False)
+    cat, _, _ = agent._weighted_distribution(hidden, x, tau=0.0, epsilon=None, top_k=False)
     model_mix = cat.probs
     diff = (mix - model_mix).abs().max().item()
 
@@ -257,8 +264,8 @@ def load_agent(env, model_dir, game_name, wrapper, target_device):
         map_location=target_device,
         weights_only=False,
     )
-    base = PPODefault(env, target_device, normalize=True).to(target_device)
-    base.load_state_dict(ckpt["model_weights"])
+    base = init_agent(env, ckpt, device)
+    base.to(target_device)
     base.eval()
     ppo_agent = PPOExpertAdapter(base)
 
@@ -317,8 +324,8 @@ def evaluate_expert(model_dir, env_fn, wrapper_key: str, episodes: int, device: 
     while len(returns) < episodes:
         # env observation is a Dict[str, np.ndarray] from MultiOCCAMWrapper
         obs_dict = obs
-        logits, _ = expert(obs_dict[wrapper_key])  # Categorical
-        action = logits.probs.argmax().item()   # greedy eval
+        categorcial, _ = expert(obs_dict[wrapper_key])  # Categorical
+        action = categorcial.sample()   # sample
         obs, reward, done, trunc, infos = env.step(action)
         ep_ret += reward
         if done or trunc:
@@ -752,12 +759,8 @@ if __name__ == "__main__":
                 name = f"{args.exp_name}_s{args.seed}"
                 run.log_model(model_path, name)  # noqa: cannot be undefined
 
-        eps_now_iter = agent.current_epsilon(
-            global_step=global_step,
-            eps_start=args.eps_start,
-            eps_end=args.eps_end,
-            eps_decay_steps=args.eps_decay_steps,
-        )
+        tau_now_iter = agent.current_value(global_step=global_step, start_value=args.tau_start, end_value=args.tau_end, decay_steps=args.tau_decay_steps)
+        temp_now_iter = agent.current_value(global_step=global_step, start_value=args.temp_start, end_value=args.temp_end, decay_steps=args.temp_decay_steps)
         log_moe_now = (iteration % args.moe_log_interval == 0)
 
         # Perform rollout in each environment
@@ -768,8 +771,10 @@ if __name__ == "__main__":
 
             with torch.no_grad():
                 action, logprob, _, value, _ = agent.get_action_and_value(
-                    next_obs, epsilon=eps_now_iter, top_k=(
-                        global_step >= args.topk_steps)
+                    next_obs,
+                    tau=tau_now_iter,
+                    temperature=temp_now_iter,
+                    top_k=(global_step >= args.topk_steps)
                 )
                 values[step] = value  # shape: [num_envs]
 
@@ -834,12 +839,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(
-                    b_obs[mb_inds],
-                    b_actions.long()[mb_inds],
-                    epsilon=eps_now_iter,
-                    top_k=False,
-                )
+                _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds], tau=tau_now_iter, top_k=False)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -951,8 +951,8 @@ if __name__ == "__main__":
                 w = agent.get_mixture_weights(
                     sample_obs[idx])  # [B, E], raw gate p
                 uniform = torch.ones_like(w) / w.size(1)
-                w_blend = (1 - eps_now_iter) * w + \
-                    eps_now_iter * uniform  # p_final
+                w_blend = (1 - tau_now_iter) * w + \
+                          tau_now_iter * uniform  # p_final
 
                 # entropies
                 entropy_raw = (-(w.clamp_min(1e-8) *
@@ -1050,7 +1050,8 @@ if __name__ == "__main__":
                     log_payload["moe/weights_entropy_raw"] = entropy_raw
                 if entropy_blend is not None:
                     log_payload["moe/weights_entropy_eps_sorblend"] = entropy_blend
-                log_payload["moe/epsilon"] = float(eps_now_iter)
+                log_payload["moe/tau"] = float(tau_now_iter)
+                log_payload["moe/temperature"] = float(temp_now_iter)
                 for e_idx, val in enumerate(w_mean):
                     name = _sanitize(agent.wrapper_names[e_idx])
                     log_payload[f"moe/weight_mean_{name}"] = float(val)

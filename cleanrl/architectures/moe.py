@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.functional as F
 from torch.distributions.categorical import Categorical
+
+from typing import Optional
 
 from .common import Predictor, layer_init
 
@@ -18,7 +21,7 @@ class MoEAgent(Predictor):
         layer_dims=(128, 64),
         weighted_sum: bool = True,
         include_policies: bool = True,
-        top_k: int | None = None,
+        top_k: Optional[int] = None,
         include_value_in_policy_input: bool = False,
     ):
         super().__init__()
@@ -128,12 +131,15 @@ class MoEAgent(Predictor):
         logits = self.actor(hidden)
         return Categorical(logits=logits)
 
-    def _weighted_distribution(self, hidden: torch.Tensor, x: torch.Tensor, epsilon: float = 0.0, top_k: bool = False):
+    def _weighted_distribution(self, hidden: torch.Tensor, x: torch.Tensor, tau: float = 0.0, temperature: float = 0.0, top_k: bool = False):
         # gating
         weights = torch.softmax(self.actor(hidden), dim=1)
 
-        if epsilon > 0.0:
-            weights = weights + epsilon * torch.rand_like(weights)
+        # save predicted weights for logging and entropy loss
+        predicted_weights_categorical = Categorical(probs=weights)
+
+        if tau > 0.0:
+            weights = weights + tau * torch.rand_like(weights)
             weights = weights.clamp_min(1e-8)
             weights = weights / weights.sum(dim=1, keepdim=True)
 
@@ -151,13 +157,20 @@ class MoEAgent(Predictor):
 
         mixed_probs = torch.sum(weights.unsqueeze(-1) * experts, dim=1)
         mixed_values = values.mean(dim=1)
-        return Categorical(probs=mixed_probs), mixed_values.detach(), weights
 
-    def current_epsilon(self, global_step: int, eps_start: float, eps_end: float, eps_decay_steps: int) -> float:
-        if eps_decay_steps <= 0:
-            return eps_end
-        progress = min(1.0, float(global_step) / float(eps_decay_steps))
-        return eps_start + progress * (eps_end - eps_start)
+        # Add temperature
+        if temperature > 0:
+            mixed_probs = mixed_probs ** temperature
+            mixed_probs /= mixed_probs.sum(dim=1, keepdim=True)
+
+        return Categorical(probs=mixed_probs.to(hidden.device)), mixed_values.detach(), predicted_weights_categorical
+
+    @staticmethod
+    def current_value(global_step: int, start_value: float, end_value: float, decay_steps: int) -> float:
+        if decay_steps <= 0:
+            return end_value
+        progress = min(1.0, float(global_step) / float(decay_steps))
+        return start_value + progress * (end_value - start_value)
 
     def get_mixture_weights(self, x: torch.Tensor) -> torch.Tensor:
         assert self.weighted_sum, "Mixture weights only exist when weighted_sum=True"
@@ -166,14 +179,14 @@ class MoEAgent(Predictor):
             weights = torch.softmax(self.actor(hidden), dim=1)
         return weights
 
-    def get_action_and_value(self, x: torch.Tensor, action=None, epsilon: float = 0.0, top_k: bool = False):
+    def get_action_and_value(self, x: torch.Tensor, action=None, tau: float = 0.0, temperature: float = 0.0, top_k: bool = False):
         hidden = self._forward_features(x)
         if self.weighted_sum:
-            categorical, _, mixed_weights = self._weighted_distribution(hidden, x, epsilon, top_k=top_k)
+            categorical, _, predicted_weights_categorical = self._weighted_distribution(hidden, x, tau, temperature, top_k=top_k)
         else:
             categorical = self._direct_distribution(hidden)
-            mixed_weights = None
+            predicted_weights_categorical = None
         if action is None:
             action = categorical.sample()
         value = self.critic(hidden).squeeze(-1)
-        return action, categorical.log_prob(action), categorical.entropy(), value, mixed_weights
+        return action, categorical.log_prob(action), predicted_weights_categorical.entropy(), value, predicted_weights_categorical.probs
