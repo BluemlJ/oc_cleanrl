@@ -136,7 +136,7 @@ class MoEAgent(Predictor):
         weights = torch.softmax(self.actor(hidden), dim=1)
 
         # save predicted weights for logging and entropy loss
-        predicted_weights_categorical = Categorical(probs=weights)
+        predicted_weights = weights
 
         if tau > 0.0:
             weights = weights + tau * torch.rand_like(weights)
@@ -163,7 +163,7 @@ class MoEAgent(Predictor):
             mixed_probs = mixed_probs ** temperature
             mixed_probs /= mixed_probs.sum(dim=1, keepdim=True)
 
-        return Categorical(probs=mixed_probs.to(hidden.device)), mixed_values.detach(), predicted_weights_categorical
+        return Categorical(probs=mixed_probs.to(hidden.device)), mixed_values.detach(), predicted_weights, weights.detach()
 
     @staticmethod
     def current_value(global_step: int, start_value: float, end_value: float, decay_steps: int) -> float:
@@ -182,11 +182,15 @@ class MoEAgent(Predictor):
     def get_action_and_value(self, x: torch.Tensor, action=None, tau: float = 0.0, temperature: float = 0.0, top_k: bool = False):
         hidden = self._forward_features(x)
         if self.weighted_sum:
-            categorical, _, predicted_weights_categorical = self._weighted_distribution(hidden, x, tau, temperature, top_k=top_k)
+            categorical, _, predicted_weights, weights = self._weighted_distribution(hidden, x, tau, temperature, top_k=top_k)
         else:
             categorical = self._direct_distribution(hidden)
-            predicted_weights_categorical = None
+            predicted_weights = None
+            weights = None
         if action is None:
             action = categorical.sample()
         value = self.critic(hidden).squeeze(-1)
-        return action, categorical.log_prob(action), predicted_weights_categorical.entropy(), value, predicted_weights_categorical.probs
+
+        entropy = torch.sum(-predicted_weights * torch.log(predicted_weights))
+
+        return action, categorical.log_prob(action), entropy, value, predicted_weights, weights

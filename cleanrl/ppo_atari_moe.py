@@ -227,7 +227,7 @@ def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
     mix = mix / mix.sum(dim=1, keepdim=True)
 
     # recompute via categorical produced by the model (should match `mix`)
-    cat, _, _ = agent._weighted_distribution(hidden, x, tau=0.0, epsilon=None, top_k=False)
+    cat = agent._weighted_distribution(hidden, x, tau=0.0, epsilon=None, top_k=False)[0]
     model_mix = cat.probs
     diff = (mix - model_mix).abs().max().item()
 
@@ -770,7 +770,7 @@ if __name__ == "__main__":
             dones[step] = next_done
 
             with torch.no_grad():
-                action, logprob, _, value, _ = agent.get_action_and_value(
+                action, logprob, _, value, _, _ = agent.get_action_and_value(
                     next_obs,
                     tau=tau_now_iter,
                     temperature=temp_now_iter,
@@ -839,7 +839,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue, mixed_weights_train = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds], tau=tau_now_iter, top_k=False)
+                _, newlogprob, entropy, newvalue, mixed_weights_pred, mixed_weights_final = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds], tau=tau_now_iter, top_k=False)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -878,9 +878,9 @@ if __name__ == "__main__":
                         ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 # Load-balancing loss (encourage all experts to get some traffic)
-                if mixed_weights_train is not None:
+                if mixed_weights_pred is not None:
                     # average routing prob per expert this minibatch
-                    freq = mixed_weights_train.mean(dim=0)  # [E]
+                    freq = mixed_weights_pred.mean(dim=0)  # [E]
                     # uniform target
                     uniform = torch.full_like(freq, 1.0 / agent.num_experts)
                     # KL(freq || uniform) = sum_i freq_i * (log freq_i - log uniform_i)
@@ -948,8 +948,6 @@ if __name__ == "__main__":
                     0), (sample_size,), device=sample_obs.device)
                 w = agent.get_mixture_weights(sample_obs[idx])     # [B, E]
                 w_mean = w.mean(dim=0).detach().cpu().numpy()      # [E]
-                w = agent.get_mixture_weights(
-                    sample_obs[idx])  # [B, E], raw gate p
                 uniform = torch.ones_like(w) / w.size(1)
                 w_blend = (1 - tau_now_iter) * w + \
                           tau_now_iter * uniform  # p_final
@@ -1024,9 +1022,9 @@ if __name__ == "__main__":
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory().used / 1e9
             disk_free = shutil.disk_usage(writer_dir).free / 1e9
-            log_payload["sys/cpu_percent"] = cpu
-            log_payload["sys/ram_used_GB"] = ram
-            log_payload["sys/disk_free_GB"] = disk_free
+            log_payload["System/cpu_percent"] = cpu
+            log_payload["System/ram_used_GB"] = ram
+            log_payload["System/disk_free_GB"] = disk_free
 
             # Optional: GPU util & temp via nvidia-smi (if present)
             if device.type == "cuda":
@@ -1037,9 +1035,9 @@ if __name__ == "__main__":
                         "--format=csv,noheader,nounits"
                     ]).decode().strip().splitlines()
                     util, temp, memfree = map(float, q[0].split(","))
-                    log_payload["sys/gpu_util_pct"] = util
-                    log_payload["sys/gpu_temp_C"] = temp
-                    log_payload["sys/gpu_mem_free_MiB"] = memfree
+                    log_payload["System/gpu_util_pct"] = util
+                    log_payload["System/gpu_temp_C"] = temp
+                    log_payload["System/gpu_mem_free_MiB"] = memfree
                 except Exception:
                     pass
 
