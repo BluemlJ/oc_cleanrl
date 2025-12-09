@@ -35,7 +35,7 @@ from architectures.ppo import PPODefault
 
 import ocatari_wrappers
 
-from cleanrl.architectures.loading import init_agent
+from architectures.loading import init_agent
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -227,7 +227,7 @@ def check_mixing(agent, x: torch.Tensor, tol=1e-5, verbose=False):
     mix = mix / mix.sum(dim=1, keepdim=True)
 
     # recompute via categorical produced by the model (should match `mix`)
-    cat = agent._weighted_distribution(hidden, x, tau=0.0, epsilon=None, top_k=False)[0]
+    cat = agent._weighted_distribution(hidden, x, tau=0.0, temperature=0.0, top_k=False)[0]
     model_mix = cat.probs
     diff = (mix - model_mix).abs().max().item()
 
@@ -1082,14 +1082,14 @@ if __name__ == "__main__":
             # }, step=global_step)
             wandb.log(log_payload, step=global_step)
 
-            if iteration % 100 == 0:
-                sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
-                idx = torch.randint(0, sample_obs.size(
-                    0), (512,), device=sample_obs.device)
-                dmax, kl_top = check_mixing(agent, sample_obs[idx])
-                if args.track:
-                    wandb.log(
-                        {"moe/mix_diff_max": dmax, "moe/kl_mix_to_top_if_conf": (kl_top or 0.0)}, step=global_step)
+            # if iteration % 100 == 0:
+            #     sample_obs = obs.reshape((-1,) + envs.observation_space.shape)
+            #     idx = torch.randint(0, sample_obs.size(
+            #         0), (512,), device=sample_obs.device)
+            #     dmax, kl_top = check_mixing(agent, sample_obs[idx])
+            #     if args.track:
+            #         wandb.log(
+            #             {"moe/mix_diff_max": dmax, "moe/kl_mix_to_top_if_conf": (kl_top or 0.0)}, step=global_step)
 
     # --- End of training loop --------------------------------------------------------
 
