@@ -133,8 +133,13 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
-    """coefficient of the entropy"""
+    # coefficient of the entropy
+    ent_coef_start: float = 0.001
+    """start value"""
+    ent_coef_end: float = 0.00003
+    """end value"""
+    ent_coef_decay_steps: int = 000
+    """how many environment steps to decay entropy coefficient over"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
@@ -761,6 +766,7 @@ if __name__ == "__main__":
 
         tau_now_iter = agent.current_value(global_step=global_step, start_value=args.tau_start, end_value=args.tau_end, decay_steps=args.tau_decay_steps)
         temp_now_iter = agent.current_value(global_step=global_step, start_value=args.temp_start, end_value=args.temp_end, decay_steps=args.temp_decay_steps)
+        ent_coef_now_iter = agent.current_value(global_step=global_step, start_value=args.ent_coef_start, end_value=args.ent_coef_end, decay_steps=args.ent_coef_decay_steps)
         log_moe_now = (iteration % args.moe_log_interval == 0)
 
         # Perform rollout in each environment
@@ -900,7 +906,7 @@ if __name__ == "__main__":
                 # PPO total loss + load balance penalty
                 loss = (
                     pg_loss
-                    - args.ent_coef * entropy_loss
+                    - ent_coef_now_iter * entropy_loss
                     + v_loss * args.vf_coef
                     + args.lb_coeff * lb_loss
                 )
@@ -993,7 +999,7 @@ if __name__ == "__main__":
                 "global_step": global_step,
                 "charts/learning_rate": optimizer.param_groups[0]["lr"],
                 "losses/policy_loss": pg_loss.item(),
-                "losses/entropy": entropy_loss.item()*args.ent_coef,
+                "losses/entropy": entropy_loss.item() * ent_coef_now_iter,
                 "diagnostics/adv_mean": adv_mean,
                 "diagnostics/adv_std": adv_std,
                 "diagnostics/delta_mean": delta.mean().item(),
