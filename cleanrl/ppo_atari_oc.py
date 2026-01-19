@@ -178,6 +178,9 @@ class Args:
     noise_std: float = 0.0
     """noise added to position and dimensions of objects"""
 
+    # scale -> empty planes
+    extra_planes: int = 0
+
     # runtime
     batch_size: int = 0
     minibatch_size: int = 0
@@ -303,7 +306,7 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
             )
         elif args.masked_wrapper == "masked_dqn_planes":
             env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(
-                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels, extra_planes=args.extra_planes
             )
         elif args.masked_wrapper == "masked_dqn_parallelplanes":
             env = ocatari_wrappers.BigPlaneWrapper(
