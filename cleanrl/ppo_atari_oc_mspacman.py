@@ -252,12 +252,14 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
                 create_buffer_stacks=[]
             )
         else:
-            from ocatari.core import OCAtari
-            env = OCAtari(
+            from hackatari.core import HackAtari
+            env = HackAtari(
                 env_id,
+                modifs=["set_level_0"],
+                rewardfunc_path=args.new_rf,
+                obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                obs_mode=args.obs_mode,
                 frameskip=args.frameskip,
                 create_buffer_stacks=[]
             )
