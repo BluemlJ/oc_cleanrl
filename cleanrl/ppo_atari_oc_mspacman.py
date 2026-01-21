@@ -239,7 +239,7 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
         logger.set_level(args.logging_level)
 
         # Backend selection
-        if idx < args.num_envs:
+        if idx < args.num_envs // 2:
             from hackatari.core import HackAtari
             env = HackAtari(
                 env_id,
