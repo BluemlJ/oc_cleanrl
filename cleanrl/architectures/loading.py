@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from .ppo import PPODefault
+from .common import NormalizeImg
 
 class PPOAgentFeatures(nn.Module):
     def __init__(self, env, device, normalize=True):
@@ -66,10 +66,52 @@ class PPOAgentNetwork(nn.Module):
         return self.network(x)
 
 
+class PPODefault(nn.Module):
+    def __init__(self, envs, device, normalize=True):
+        super().__init__()
+        self.device = device
+
+        dims = envs.observation_space.shape
+
+        self.network = nn.Sequential(
+            nn.Conv2d(dims[0], 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU()
+        )
+
+        if normalize:  # x / 255
+            self.network.insert(0, NormalizeImg())
+
+        self.network.append(nn.Flatten())
+
+        # compute flatten size with a dummy forward
+        # makes the agent applicable for any input image size
+        with torch.no_grad():
+            f = self.network(torch.zeros((1,) + dims))
+            feat_dim = f.flatten().shape[0]
+
+        self.network.append(nn.Linear(feat_dim, 512))
+        self.network.append(nn.ReLU())
+
+        self.actor = nn.Linear(512, envs.action_space.n)
+        self.critic = nn.Linear(512, 1)
+
+    def draw_action(self, state):
+        hidden = self.network(state)
+        logits = self.actor(hidden)
+        return torch.argmax(logits)
+
+    def features(self, x):
+        return self.network(x)
+
+
 def init_agent(env, ckpt, device):
     if "network.0.weight" in ckpt["model_weights"]:
         agent_class = PPOAgentNetwork
-    elif "features.1.weight" in ckpt["model_weights"]:
+    elif "network.1.weight" in ckpt["model_weights"]:
         agent_class = PPODefault
     elif "features.0.weight" in ckpt["model_weights"]:
         agent_class = PPOAgentFeatures
