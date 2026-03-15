@@ -97,7 +97,7 @@ class Args:
     """Logging level for the Gymnasium logger"""
     author : str = "JB"
     """Initials of the author"""
-    checkpoint_interval: int = 40
+    checkpoint_interval: int = 10_000_000
     """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
@@ -308,7 +308,7 @@ if __name__ == "__main__":
         args.obs_mode = "ori"
 
     # Create RTPT object to monitor progress with estimated time remaining
-    rtpt = RTPT(name_initials=args.author, experiment_name='OCALM',
+    rtpt = RTPT(name_initials=args.author, experiment_name=args.exp_name,
                 max_iterations=args.num_iterations)
     rtpt.start()  # Start RTPT tracking
 
@@ -576,7 +576,6 @@ if __name__ == "__main__":
                            capture_video=args.capture_video,
                            run_dir=writer_dir,
                            device=device)
-
         wandb.log({"FinalReward": np.mean(rewards)})
 
         if args.test_modifs != "":
