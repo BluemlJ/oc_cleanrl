@@ -19,7 +19,6 @@ from gymnasium import logger
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 
 from stable_baselines3.common.atari_wrappers import (
     EpisodicLifeEnv,
@@ -275,7 +274,6 @@ if __name__ == "__main__":
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
             config=vars(args),
             name=run_name,
             monitor_gym=True,
@@ -287,13 +285,6 @@ if __name__ == "__main__":
     else:
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
-
-    # Initialize Tensorboard SummaryWriter to log metrics and hyperparameters
-    writer = SummaryWriter(writer_dir)
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
 
     # prepare for masking wrappers
     if "masked" in args.obs_mode:
@@ -532,24 +523,33 @@ if __name__ == "__main__":
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # Log episode statistics for Tensorboard
+        # Log episode statistics to W&B
+        stats = {"global_step": global_step}
         if done_in_episode:
-            if args.new_rf:
-                writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
-            writer.add_scalar("charts/Episodic_Original_Reward", eorgr / count, global_step)
-            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
+            if args.new_rf:
+                stats |= {"charts/Episodic_New_Reward": enewr}
+            stats |= {
+                "charts/Episodic_Original_Reward": eorgr / count,
+                "charts/Episodic_Length": elength / count,
+            }
+            
 
         # Log other statistics
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        stats |= {
+            "charts/learning_rate": optimizer.param_groups[0]["lr"],
+            "losses/value_loss": v_loss.item(),
+            "losses/policy_loss": pg_loss.item(),
+            "losses/entropy": entropy_loss.item(),
+            "losses/old_approx_kl": old_approx_kl.item(),
+            "losses/approx_kl": approx_kl.item(),
+            "losses/clipfrac": np.mean(clipfracs),
+            "losses/explained_variance": explained_var,
+            "charts/SPS": int(global_step / (time.time() - start_time)),
+            }
+
+        if args.track:
+            wandb.log(stats)
 
         # Update RTPT for progress tracking
         rtpt.step()
@@ -600,4 +600,3 @@ if __name__ == "__main__":
 
     # Close environments and writer after training is complete
     envs.close()
-    writer.close()

@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch.nn import TransformerEncoderLayer, TransformerEncoder
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
+
 from torch.distributions.categorical import Categorical
 
 from stable_baselines3.common.atari_wrappers import (  # isort:skip
@@ -91,7 +91,7 @@ class Args:
     """the entity (team) of wandb's project"""
     wandb_dir: str = "../../wandb"
     """the wandb directory"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
     """Path to a checkpoint to a model to start training from"""
@@ -295,25 +295,18 @@ if __name__ == "__main__":
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
             config=vars(args),
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            dir=args.wandb_dir
+            dir=args.wandb_dir,
+            tags=["ORBiT" if args.player_name != "" else "Transformer", "new", args.env_id]
         )
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
-
-    writer = SummaryWriter(writer_dir)
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join(
-            [f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
 
     # Create RTPT object
     rtpt = RTPT(name_initials=args.author, experiment_name=f'ORBiT_{args.env_id.split("ALE/")[-1].split("-v")[0]}',
@@ -491,23 +484,32 @@ if __name__ == "__main__":
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # Log episode statistics to W&B
+        stats = {"global_step": global_step}
         if done_in_episode:
-            if args.backend == 1 or (args.backend == 2 and args.new_rf):
-                writer.add_scalar("charts/Episodic_NewRF", enewr / count, global_step)
-            writer.add_scalar("charts/Episodic_OrgRF", eorgr / count, global_step)
-            writer.add_scalar("charts/Episodic_Length", elength / count, global_step)
             pbar.set_description(f"Reward: {eorgr.item() / count:.1f}")
+            if args.new_rf:
+                stats |= {"charts/Episodic_New_Reward": enewr}
+            stats |= {
+                "charts/Episodic_Original_Reward": eorgr / count,
+                "charts/Episodic_Length": elength / count,
+            }
 
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        # Log other statistics
+        stats |= {
+            "charts/learning_rate": optimizer.param_groups[0]["lr"],
+            "losses/value_loss": v_loss.item(),
+            "losses/policy_loss": pg_loss.item(),
+            "losses/entropy": entropy_loss.item(),
+            "losses/old_approx_kl": old_approx_kl.item(),
+            "losses/approx_kl": approx_kl.item(),
+            "losses/clipfrac": np.mean(clipfracs),
+            "losses/explained_variance": explained_var,
+            "charts/SPS": int(global_step / (time.time() - start_time)),
+        }
+
+        if args.track:
+            wandb.log(stats)
 
         # Update RTPT
         rtpt.step()
@@ -543,4 +545,3 @@ if __name__ == "__main__":
         wandb.finish()
 
     envs.close()
-    writer.close()
