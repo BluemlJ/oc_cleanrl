@@ -143,11 +143,11 @@ class Args:
     """number of transformer blocks"""
     pooling_type: str = "mean"
     """the type of the pooling layer"""
-    num_post_layers: int = 1
+    num_post_layers: int = 0
     """number of layers after transformer"""
     masking: bool = True
     """masking away padding objects for batching purpose"""
-    dropout: float = 0.1
+    dropout: float = 0.0
     """dropout probability in the transformer layers"""
 
     # Wrapper
