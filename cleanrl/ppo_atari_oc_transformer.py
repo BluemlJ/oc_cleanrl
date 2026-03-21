@@ -141,7 +141,7 @@ class Args:
     """number of multi-attention heads"""
     num_blocks: int = 3
     """number of transformer blocks"""
-    pooling_type: str = "max"
+    pooling_type: str = "mean"
     """the type of the pooling layer"""
     num_post_layers: int = 1
     """number of layers after transformer"""
