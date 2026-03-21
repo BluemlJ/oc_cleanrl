@@ -79,7 +79,7 @@ class Args:
     """Modifications for Hackatari"""
     new_rf: str = ""
     """Path to a new reward functions for OCALM and HACKATARI"""
-    frameskip: int = -1
+    frameskip: int = 4
     """the frame skipping option of the environment"""
 
     # Tracking (Logging and monitoring configurations)
