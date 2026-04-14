@@ -149,6 +149,8 @@ class Args:
     """masking away padding objects for batching purpose"""
     dropout: float = 0.0
     """dropout probability in the transformer layers"""
+    normalize_objects: bool = False
+    """Normalize position and velocity to [0, 1]"""
 
     # Wrapper
     player_name: str = "Player"
@@ -213,7 +215,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                         use_polar_coordinates=args.use_polar_coordinates,
                         relative_velocity=args.relative_velocity,
                         include_wh=args.include_wh,
-                        zero_player=args.zero_player)
+                        zero_player=args.zero_player,
+                        normalize=args.normalize_objects)
 
         return env
 
