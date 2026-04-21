@@ -68,7 +68,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    version: int = 3
+    version: int = 4
     
     # Environment parameters
     env_id: str = "ALE/Pong-v5"
