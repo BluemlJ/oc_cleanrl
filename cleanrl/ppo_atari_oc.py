@@ -182,6 +182,7 @@ class Args:
     extra_planes: int = 0
     v2: bool = False
     num_dqn_stacks: int = 0
+    rad: bool = False
 
     # runtime
     batch_size: int = 0
@@ -453,6 +454,32 @@ if __name__ == "__main__":
         wandb.summary["params_total"] = num_params
         wandb.watch(agent, log="gradients", log_freq=1000, log_graph=False)
 
+    if args.rad:
+        from torchvision import transforms
+        aug = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomRotation(10),
+            transforms.RandomHorizontalFlip(p=0.2),  # flip (Atari is symmetric in some games)
+            transforms.RandomVerticalFlip(p=0.2),  # flip vertically
+            transforms.RandomChoice([
+                transforms.CenterCrop(84),
+                transforms.RandomResizedCrop(84),
+                transforms.RandomCrop(84, 4),  # random crop back to 84x84
+            ]),
+            transforms.ToTensor(),
+            transforms.RandomErasing(p=0.2), # random black boxes
+            transforms.Lambda(lambda o: (o / 255) ** (2 * np.random.beta(2, 2))  * 255),
+        ])
+        def maybe_rad(o):
+            length = len(o)
+            img = o[...]
+
+            for i in range(length):
+                img[i] = aug(img[i]) # apply crop, rotate, flip
+            return img
+    else:
+        maybe_rad = lambda o: o
+
     # Allocate rollout storage (clear dtypes, on device)
     obs_space_shape = envs.observation_space.shape
     act_space_shape = envs.action_space.shape
@@ -568,8 +595,11 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
+                # do RAD image augmentations if wanted
+                mb_obs = maybe_rad(b_obs[mb_inds])
+
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    b_obs[mb_inds], b_actions.long()[mb_inds]
+                    mb_obs, b_actions.long()[mb_inds]
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
