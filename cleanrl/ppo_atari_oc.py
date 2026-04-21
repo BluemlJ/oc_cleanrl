@@ -181,6 +181,7 @@ class Args:
     # scale -> empty planes
     extra_planes: int = 0
     v2: bool = False
+    num_dqn_stacks: int = 0
 
     # runtime
     batch_size: int = 0
@@ -316,6 +317,10 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
         elif args.masked_wrapper == "masked_dqn_pixel_planes":
             env = ocatari_wrappers.PixelMaskPlanesWrapper(
                 env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+            )
+        elif args.num_dqn_stacks > 0:
+            env = ocatari_wrappers.MultiplyInputWrapper(
+                env, args.num_dqn_stacks
             )
 
         # Seed env + spaces via Gymnasium API
