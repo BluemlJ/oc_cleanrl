@@ -35,7 +35,7 @@ from architectures.ppo import PPODefault
 
 import ocatari_wrappers
 
-from cleanrl.architectures.loading import init_agent
+from architectures.loading import init_agent
 
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -68,7 +68,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    version: int = 3
+    version: int = 4
     
     # Environment parameters
     env_id: str = "ALE/Pong-v5"
