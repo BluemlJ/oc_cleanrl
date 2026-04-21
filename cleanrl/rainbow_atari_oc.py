@@ -37,19 +37,21 @@ from torch.utils.tensorboard import SummaryWriter
 
 import ocatari_wrappers
 
-from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.utils import set_random_seed
-
-# Suppress warnings to avoid cluttering output
+# -----------------------
+# Warnings & determinism
+# -----------------------
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# Set CUDA environment variable for determinism
+# cuBLAS deterministic workspace (required by torch.use_deterministic_algorithms on CUDA)
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-# Add the evaluation directory to the Python path to import custom evaluation functions
+# -----------------------
+# Evals import
+# -----------------------
 eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
+from generic_eval import evaluate  # noqa
 
 
 @dataclass
@@ -71,7 +73,7 @@ class Args:
     """observation mode for OCAtari"""
     buffer_window_size: int = 4
     """length of history in the observations"""
-    backend: str = "HackAtari"
+    backend: str = "OCAtari"
     """Which Backend should we use"""
     modifs: str = ""
     """Modifications for Hackatari"""
@@ -85,7 +87,7 @@ class Args:
     # Tracking (Logging and monitoring configurations)
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "OC-Transformer"
+    wandb_project_name: str = "MaskedDQN"
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
@@ -97,14 +99,8 @@ class Args:
     """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
-    author: str = "JB"
+    author: str = "CD"
     """Initials of the author"""
-    save_model: bool = False
-    """whether to save model into the `runs/{run_name}` folder"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm-specific arguments
     architecture: str = "Rainbow"
@@ -157,14 +153,39 @@ class Args:
     decoder_dims: list[int] = (512,)
     """layer dimensions after nn.Flatten()"""
 
+    v2: bool = True
+    """only use HUD planes if true in OCAtari"""
+
+
 # Global variable to hold parsed arguments
 global args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def _log_model_artifact(run, path, name, iteration=None, metadata=None):
+    import wandb
+    aliases = ["latest"]
+    if iteration is not None:
+        aliases.append(f"iter-{iteration}")
+    art = wandb.Artifact(name=name, type="model", metadata=metadata or {})
+    art.add_file(path)
+    run.log_artifact(art, aliases=aliases)
+
+
+def make_env(env_id, idx, capture_video, run_dir, seed=None):
+    """
+    Creates a gym environment with the specified settings and seeds it.
+    """
     def thunk():
+        # Per-subprocess RNG seeds (VERY important)
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        if seed is not None:
+            torch.manual_seed(seed)
+
         logger.set_level(args.logging_level)
-        # Setup environment based on backend type (HackAtari, OCAtari, Gym)
+
+        # Backend selection
         if args.backend == "HackAtari":
             from hackatari.core import HackAtari
             modifs = [i for i in args.modifs.split(" ") if i]
@@ -176,60 +197,72 @@ def make_env(env_id, seed, idx, capture_video, run_name):
                 hud=False,
                 render_mode="rgb_array",
                 frameskip=args.frameskip,
-                dopamine_pooling=True
+                create_buffer_stacks=[]
+            )
+        elif args.backend == "OCAtari":
+            from ocatari.core import OCAtari
+            env = OCAtari(
+                env_id,
+                hud=False,
+                render_mode="rgb_array",
+                obs_mode=args.obs_mode,
+                frameskip=args.frameskip,
+                create_buffer_stacks=[]
             )
         elif args.backend == "Gym":
-            if capture_video and idx == 0:
-                env = gym.make(env_id, render_mode="rgb_array")
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-            else:
-                env = gym.make(env_id)
-            env = gym.wrappers.RecordEpisodeStatistics(env)
-
-            #env = NoopResetEnv(env, noop_max=30)
-            env = MaxAndSkipEnv(env, skip=4)
-            #env = EpisodicLifeEnv(env)
-            #if "FIRE" in env.unwrapped.get_action_meanings():
-            #    env = FireResetEnv(env)
-            env = ClipRewardEnv(env)
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, 4)
-
-            env.action_space.seed(seed)
+            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
         else:
             raise ValueError("Unknown Backend")
 
-        # Capture video if required
+        # Capture video from env #0
         if capture_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env,
-                                           f"{run_name}/media/videos",
-                                           disable_logger=True)
+            env = gym.wrappers.RecordVideo(env, f"{run_dir}/media/videos", disable_logger=True)
 
-        # Apply standard Atari environment wrappers
+        # Standard Atari wrappers
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
 
-        # If masked obs_mode are set, apply correct wrapper
+        # Masking wrappers
         if args.masked_wrapper == "masked_dqn_bin":
-            env = ocatari_wrappers.BinaryMaskWrapper(env, buffer_window_size=args.buffer_window_size)
+            env = ocatari_wrappers.BinaryMaskWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+            )
         elif args.masked_wrapper == "masked_dqn_pixels":
-            env = ocatari_wrappers.PixelMaskWrapper(env, buffer_window_size=args.buffer_window_size)
+            env = ocatari_wrappers.PixelMaskWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+            )
         elif args.masked_wrapper == "masked_dqn_grayscale":
-            env = ocatari_wrappers.ObjectTypeMaskWrapper(env, buffer_window_size=args.buffer_window_size)
+            env = ocatari_wrappers.ObjectTypeMaskWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels, v2=args.v2
+            )
         elif args.masked_wrapper == "masked_dqn_planes":
-           env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size)
-        #elif args.masked_wrapper == "masked_dqn_pixel_planes":
-        #    env = ocatari_wrappers.PixelMaskPlanesWrapper(env, buffer_window_size=args.buffer_window_size,
-        #                                                 include_pixels=args.add_pixels)
-        #elif args.masked_wrapper == "masked_dl":
-        #    env = ocatari_wrappers.DLWrapper(env, buffer_window_size=args.buffer_window_size,
-        #                                     include_pixels=args.add_pixels)
-        #elif args.masked_wrapper == "masked_dl_grouped":
-        #    env = ocatari_wrappers.DLGroupedWrapper(env, buffer_window_size=args.buffer_window_size)
+            env = ocatari_wrappers.ObjectTypeMaskPlanesWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels, v2=args.v2
+            )
+        elif args.masked_wrapper == "masked_dqn_parallelplanes":
+            env = ocatari_wrappers.BigPlaneWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+            )
+        elif args.masked_wrapper == "masked_dqn_pixel_planes":
+            env = ocatari_wrappers.PixelMaskPlanesWrapper(
+                env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
+            )
+
+        # Seed env + spaces via Gymnasium API
+        try:
+            env.reset(seed=seed)
+        except TypeError:
+            env.seed(seed)
+        if hasattr(env, "action_space") and hasattr(env.action_space, "seed"):
+            env.action_space.seed(seed)
+        if hasattr(env, "observation_space") and hasattr(env.observation_space, "seed"):
+            env.observation_space.seed(seed)
 
         return env
 
@@ -325,6 +358,12 @@ class NoisyDuelingDistributionalNetwork(nn.Module):
         for layer in self.advantage_head:
             if isinstance(layer, NoisyLinear):
                 layer.reset_noise()
+
+    def get_action_and_value(self, obs):
+        q_dist = self.forward(obs)
+        q_values = torch.sum(q_dist * self.support, dim=2)
+        actions = torch.argmax(q_values, dim=1)
+        return actions, None, None, q_values
 
 
 PrioritizedBatch = collections.namedtuple(
@@ -512,24 +551,33 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
-        import wandb
 
+    # W&B init (optional)
+    if args.track:
+        import dataclasses, wandb
+
+        wb_dir = args.wandb_dir or str(Path("runs") / run_name)
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
             name=run_name,
-            monitor_gym=True,
+            config=dataclasses.asdict(args),
+            sync_tensorboard=True,
             save_code=True,
-            dir=args.wandb_dir
+            dir=wb_dir,
+            job_type="train",
+            group=f"{args.env_id}_{args.architecture}",
+            tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
+            resume="allow",
         )
-            
+        wandb.define_metric("global_step")
+        wandb.define_metric("charts/*", step_metric="global_step")
+        wandb.define_metric("losses/*", step_metric="global_step")
+        wandb.define_metric("time/*", step_metric="global_step")
         writer_dir = run.dir
         postfix = dict(url=run.url)
     else:
-        writer_dir = f"{args.wandb_dir}/runs/{run_name}"
+        writer_dir = str(Path(args.wandb_dir or ".") / "runs" / run_name)
         postfix = None
 
     writer = SummaryWriter(f"runs/{run_name}")
@@ -567,7 +615,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name)
+        [make_env(args.env_id, i, args.capture_video, run_name, args.seed + i)
          for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space,
@@ -629,9 +677,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     #print(
                     #    f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     pbar.set_description(f"Reward: {info['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return",
+                    writer.add_scalar("charts/Episodic_Original_Reward",
                                       info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length",
+                    writer.add_scalar("charts/Episodic_Length",
                                       info["episode"]["l"], global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -713,7 +761,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                                       q_values.mean().item(), global_step)
                     sps = int(global_step / (time.time() - start_time))
                     #print("SPS:", sps)
-                    writer.add_scalar("charts/SPS", sps, global_step)
+                    writer.add_scalar("time/SPS", sps, global_step)
                     writer.add_scalar("charts/beta", rb.beta, global_step)
 
                 # optimize the model
@@ -731,7 +779,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             rtpt.step()
 
     # Save the trained model to disk
-    model_path = f"{writer_dir}/{args.exp_name}.cleanrl_model"
+    model_path = f"{writer_dir}/{args.exp_name}_final.cleanrl_model"
     model_data = {
         "model_weights": q_network.state_dict(),
         "args": vars(args),
@@ -741,17 +789,41 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # Log final model and performance with Weights and Biases if enabled
     if args.track:
-        
-        # Log model to Weights and Biases
-        name = f"{args.exp_name}_s{args.seed}"
-        run.log_model(model_path, name)  # noqa: cannot be undefined
+        import wandb
+        _log_model_artifact(run, model_path, name=f"{args.exp_name}",
+                            iteration=None, metadata={"final": True})
 
-        # Log video of agent's performance
+        # Evaluate agent's performance
+        args.new_rf = ""
+        rewards = evaluate(
+            q_network, make_env, 10,
+            env_id=args.env_id, capture_video=args.capture_video,
+            run_dir=writer_dir, device=device
+        )
+        wandb.summary["FinalReward_mean"] = float(np.mean(rewards))
+        wandb.summary["FinalReward_median"] = float(np.median(rewards))
+        wandb.summary["FinalReward_min"] = float(np.min(rewards))
+        wandb.summary["FinalReward_max"] = float(np.max(rewards))
+        wandb.log({"eval/RewardHist": wandb.Histogram(rewards)}, step=global_step)
+
+        # Optional: videos to W&B + artifact (visible in UI)
         if args.capture_video:
-            import glob
-            list_of_videos = glob.glob(f"{writer_dir}/media/videos/*.mp4")
-            latest_video = max(list_of_videos, key=os.path.getctime)
-            wandb.log({"video": wandb.Video(latest_video)})
+            import os, glob
+
+            video_dir = f"{writer_dir}/media/videos"
+            videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))
+            if videos:
+                # Log a couple of the most recent videos to the Media panel
+                for v in videos[-2:]:
+                    wandb.log({"video": wandb.Video(v, fps=30, format="mp4")}, step=global_step)
+                # Force-upload all videos to the Files tab immediately
+                wandb.save(os.path.join(video_dir, "*.mp4"), policy="now")
+
+                # Also keep a versioned artifact with all videos
+                va = wandb.Artifact(f"{args.exp_name}-videos", type="videos")
+                for v in videos:
+                    va.add_file(v)
+                run.log_artifact(va, aliases=["latest"])
 
         wandb.finish()
 

@@ -46,7 +46,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 # -----------------------
 oc_atari_dir = os.getenv("OC_ATARI_DIR")
 if oc_atari_dir is not None:
-    oc_atari_path = os.path.join(Path(__file__).parent, oc_atari_dir)
+    oc_atari_path = os.path.join(Path(__file__), oc_atari_dir)
     sys.path.insert(1, oc_atari_path)
 
 # -----------------------
@@ -105,15 +105,13 @@ class Args:
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     ckpt: str = ""
-    """Path to a checkpoint to resume training from (unused placeholder)"""
+    """Path to a checkpoint to a model to start training from"""
     logging_level: int = 40
     """Logging level for the Gymnasium logger"""
     author: str = "JB"
     """Initials of the author"""
-    checkpoint_interval: int = 2_000_000
-    """Save a model checkpoint every N timesteps (compared against global_step)"""
-    wandb_log_freq: int = 50
-    """Log heavy extras (histograms, GPU mem) every N iterations; 0 = never"""
+    checkpoint_interval: int = 1_000_000
+    """Number of iterations before a model checkpoint is saved and uploaded to wandb"""
 
     # Algorithm-specific arguments
     architecture: str = "PPO"
@@ -183,7 +181,6 @@ class Args:
     # scale -> empty planes
     extra_planes: int = 0
     v2: bool = False
-    num_dqn_stacks: int = 0
 
     # runtime
     batch_size: int = 0
@@ -242,36 +239,30 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
         logger.set_level(args.logging_level)
 
         # Backend selection
-        if args.backend == "HackAtari":
+        if idx < args.num_envs // 2:
             from hackatari.core import HackAtari
-            modifs = [i for i in args.modifs.split(" ") if i]
             env = HackAtari(
                 env_id,
-                modifs=modifs,
+                modifs=["set_level_2"],
                 rewardfunc_path=args.new_rf,
                 obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
                 frameskip=args.frameskip,
                 create_buffer_stacks=[]
-                )
-        elif args.backend == "OCAtari":
-            from ocatari.core import OCAtari
-            env = OCAtari(
+            )
+        else:
+            from hackatari.core import HackAtari
+            env = HackAtari(
                 env_id,
+                modifs=["set_level_0"],
+                rewardfunc_path=args.new_rf,
+                obs_mode=args.obs_mode,
                 hud=False,
                 render_mode="rgb_array",
-                obs_mode=args.obs_mode,
                 frameskip=args.frameskip,
                 create_buffer_stacks=[]
             )
-        elif args.backend == "Gym":
-            env = gym.make(env_id, render_mode="rgb_array", frameskip=args.frameskip)
-            env = gym.wrappers.ResizeObservation(env, (84, 84))
-            env = gym.wrappers.GrayScaleObservation(env)
-            env = gym.wrappers.FrameStack(env, args.buffer_window_size)
-        else:
-            raise ValueError("Unknown Backend")
 
         # Capture video from env #0
         if capture_video and idx == 0:
@@ -319,10 +310,6 @@ def make_env(env_id, idx, capture_video, run_dir, seed=None):
         elif args.masked_wrapper == "masked_dqn_pixel_planes":
             env = ocatari_wrappers.PixelMaskPlanesWrapper(
                 env, buffer_window_size=args.buffer_window_size, include_pixels=args.add_pixels
-            )
-        elif args.num_dqn_stacks > 0:
-            env = ocatari_wrappers.MultiplyInputWrapper(
-                env, args.num_dqn_stacks
             )
 
         # Seed env + spaces via Gymnasium API
@@ -381,19 +368,13 @@ if __name__ == "__main__":
             name=run_name,
             config=dataclasses.asdict(args),
             sync_tensorboard=True,
-            save_code=False,  # disabled: causes unwanted temp files in run dir
+            save_code=True,
             dir=wb_dir,
             job_type="train",
             group=f"{args.env_id}_{args.architecture}",
             tags=[args.env_id, args.architecture, args.backend, args.obs_mode],
+            resume="allow",
         )
-        # Save this training script as a versioned code artifact
-        code_art = wandb.Artifact(f"{args.exp_name}-code", type="code")
-        code_art.add_file(__file__)
-        if args.new_rf:
-            code_art.add_file(args.new_rf)
-        run.log_artifact(code_art, aliases=["latest"])
-
         wandb.define_metric("global_step")
         wandb.define_metric("charts/*", step_metric="global_step")
         wandb.define_metric("losses/*", step_metric="global_step")
@@ -459,7 +440,7 @@ if __name__ == "__main__":
     if args.track:
         num_params = sum(p.numel() for p in agent.parameters())
         wandb.summary["params_total"] = num_params
-        # wandb.watch omitted: gradient histograms are very data-hungry
+        wandb.watch(agent, log="gradients", log_freq=1000, log_graph=False)
 
     # Allocate rollout storage (clear dtypes, on device)
     obs_space_shape = envs.observation_space.shape
@@ -493,8 +474,8 @@ if __name__ == "__main__":
         enewr = 0.0
         count = 0
 
-        # Checkpoint (every N timesteps; uses global_step so the interval is in actual env steps)
-        if args.checkpoint_interval > 0 and global_step % args.checkpoint_interval < args.batch_size:
+        # Checkpoint
+        if iteration % args.checkpoint_interval == 0:
             model_path = f"{writer_dir}/{args.exp_name}_{iteration}.cleanrl_model"
             model_data = {
                 "model_weights": agent.state_dict(),
@@ -527,7 +508,7 @@ if __name__ == "__main__":
             next_done = torch.tensor(next_done_np, dtype=torch.float32, device=device)
 
             # Per-episode stats
-            if next_done.any():
+            if bool(next_done.bool().any()):
                 for info in infos:
                     if "episode" in info:
                         r = float(info["episode"]["r"])
@@ -614,11 +595,17 @@ if __name__ == "__main__":
                 - args.ent_coef * entropy_loss \
                 + v_loss * args.vf_coef
 
+                #optimizer.zero_grad()
                 for param in agent.parameters():
                     param.grad = None
+                    
                 loss.backward()
                 gn = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
+
+                if args.track and (start % (args.minibatch_size * 4) == 0):
+                    import wandb
+                    wandb.log({"losses/grad_total_norm": float(gn)}, step=global_step)
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
@@ -628,7 +615,7 @@ if __name__ == "__main__":
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TensorBoard scalars (also picked up by W&B via sync_tensorboard)
+        # TensorBoard scalars (remain)
         if count > 0:
             if args.new_rf:
                 writer.add_scalar("charts/Episodic_New_Reward", enewr / count, global_step)
@@ -645,43 +632,36 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", float(np.mean(clipfracs)), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("losses/loss", loss.item(), global_step)
-        writer.add_scalar("losses/grad_total_norm", float(gn), global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        # W&B: send the key charts explicitly so they land on the correct x-axis.
-        # sync_tensorboard can misalign custom step metrics; these few floats are negligible.
+        # W&B enrichments
         if args.track:
             import wandb
-            charts = {
+            log_payload = {
                 "global_step": global_step,
-                "charts/SPS": int(global_step / (time.time() - start_time)),
                 "charts/learning_rate": optimizer.param_groups[0]["lr"],
                 "losses/value_loss": v_loss.item(),
                 "losses/policy_loss": pg_loss.item(),
                 "losses/entropy": entropy_loss.item(),
+                "losses/old_approx_kl": old_approx_kl.item(),
                 "losses/approx_kl": approx_kl.item(),
                 "losses/clipfrac": float(np.mean(clipfracs)),
                 "losses/explained_variance": float(explained_var),
                 "losses/loss": loss.item(),
+                "time/SPS": int(global_step / (time.time() - start_time)),
             }
             if count > 0:
                 if args.new_rf:
-                    charts["charts/Episodic_New_Reward"] = enewr / count
-                charts["charts/Episodic_Original_Reward"] = eorgr / count
-                charts["charts/Episodic_Length"] = elength / count
-            wandb.log(charts, step=global_step)
-
-        # Heavy W&B extras at reduced frequency (wandb already imported above when args.track)
-        if args.track and args.wandb_log_freq > 0 and iteration % args.wandb_log_freq == 0:
-            extras = {}
+                    log_payload["charts/Episodic_New_Reward"] = enewr / count
+                log_payload["charts/Episodic_Original_Reward"] = eorgr / count
+                log_payload["charts/Episodic_Length"] = elength / count
             if episode_returns:
-                extras["charts/ReturnHist"] = wandb.Histogram(episode_returns)
-                extras["charts/LengthHist"] = wandb.Histogram(episode_lengths)
+                log_payload["charts/ReturnHist"] = wandb.Histogram(episode_returns)
+                log_payload["charts/LengthHist"] = wandb.Histogram(episode_lengths)
             if device.type == "cuda":
-                extras["sys/gpu_mem_alloc_GB"] = torch.cuda.memory_allocated() / 1e9
-                extras["sys/gpu_mem_reserved_GB"] = torch.cuda.memory_reserved() / 1e9
-            if extras:
-                wandb.log(extras, step=global_step)
+                log_payload["sys/gpu_mem_alloc_GB"] = torch.cuda.memory_allocated() / 1e9
+                log_payload["sys/gpu_mem_reserved_GB"] = torch.cuda.memory_reserved() / 1e9
+            wandb.log(log_payload, step=global_step)
 
         rtpt.step()
 
@@ -696,14 +676,7 @@ if __name__ == "__main__":
         _log_model_artifact(run, model_path, name=f"{args.exp_name}",
                             iteration=None, metadata={"final": True})
 
-        # Save reward function before clearing new_rf for eval
-        if args.new_rf:
-            rf_art = wandb.Artifact(f"{args.exp_name}-reward-fn", type="code")
-            rf_art.add_file(args.new_rf)
-            run.log_artifact(rf_art, aliases=["latest"])
-            logger.info(f"reward function '{args.new_rf}' logged as W&B code artifact")
-
-        # Evaluate agent's performance (clear new_rf so eval uses original reward)
+        # Evaluate agent's performance
         args.new_rf = ""
         rewards = evaluate(
             agent, make_env, 10,
@@ -716,14 +689,19 @@ if __name__ == "__main__":
         wandb.summary["FinalReward_max"] = float(np.max(rewards))
         wandb.log({"eval/RewardHist": wandb.Histogram(rewards)}, step=global_step)
 
-        # Videos artifact
+        # Optional: videos to W&B + artifact (visible in UI)
         if args.capture_video:
-            import glob as _glob
+            import os, glob
             video_dir = f"{writer_dir}/media/videos"
-            videos = sorted(_glob.glob(os.path.join(video_dir, "*.mp4")))
+            videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))
             if videos:
+                # Log a couple of the most recent videos to the Media panel
                 for v in videos[-2:]:
                     wandb.log({"video": wandb.Video(v, fps=30, format="mp4")}, step=global_step)
+                # Force-upload all videos to the Files tab immediately
+                wandb.save(os.path.join(video_dir, "*.mp4"), policy="now")
+
+                # Also keep a versioned artifact with all videos
                 va = wandb.Artifact(f"{args.exp_name}-videos", type="videos")
                 for v in videos:
                     va.add_file(v)

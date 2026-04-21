@@ -28,8 +28,8 @@ class PPODefault(Predictor):
             nn.ReLU()
         )
 
-        #if normalize:  # x / 255
-        #    self.network.insert(0, NormalizeImg())
+        if normalize:  # x / 255
+           self.network.insert(0, NormalizeImg())
 
         self.network.append(nn.Flatten())
         
