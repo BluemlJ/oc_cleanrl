@@ -465,26 +465,22 @@ if __name__ == "__main__":
     if args.rad:
         from torchvision import transforms
         aug = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.RandomRotation(10),
-            transforms.RandomHorizontalFlip(p=0.2),  # flip (Atari is symmetric in some games)
-            transforms.RandomVerticalFlip(p=0.2),  # flip vertically
-            transforms.RandomChoice([
-                transforms.CenterCrop(84),
-                transforms.RandomResizedCrop(84),
-                transforms.RandomCrop(84, 4),  # random crop back to 84x84
-            ]),
-            transforms.ToTensor(),
-            transforms.RandomErasing(p=0.2), # random black boxes
-            transforms.Lambda(lambda o: (o / 255) ** (2 * np.random.beta(2, 2))  * 255),
+            # transforms.RandomRotation(10),
+            # transforms.RandomHorizontalFlip(p=0.2),  # flip (Atari is symmetric in some games)
+            # transforms.RandomVerticalFlip(p=0.2),  # flip vertically
+            transforms.RandomApply(
+                [transforms.RandomChoice([
+                    transforms.RandomResizedCrop(84),
+                    transforms.RandomCrop(84, 4),  # random crop back to 84x84
+                ])],
+                p=0.2
+            ),
+            # transforms.RandomErasing(p=0.2), # random black boxes
+            transforms.Lambda(lambda o: (o / 255) ** (2 * np.random.beta(2, 2))  * 255 if np.random.random() > 0.8 else o),
         ])
         def maybe_rad(o):
-            length = len(o)
-            img = o[...]
-
-            for i in range(length):
-                img[i] = aug(img[i]) # apply crop, rotate, flip
-            return img
+            tmp = torch.stack([aug(img) for img in o]).to(device)
+            return tmp
     else:
         maybe_rad = lambda o: o
 
