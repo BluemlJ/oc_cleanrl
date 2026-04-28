@@ -149,8 +149,6 @@ class Args:
     """masking away padding objects for batching purpose"""
     dropout: float = 0.0
     """dropout probability in the transformer layers"""
-    normalize_objects: bool = False
-    """Normalize position and velocity to [0, 1]"""
 
     # Wrapper
     player_name: str = "Player"
@@ -165,6 +163,8 @@ class Args:
     """use width and height of the objects in addition to position and velocity"""
     zero_player: bool = False
     """Player position always zero to have no absolute values"""
+    normalize_objects: bool = False
+    """Normalize position and velocity to [0, 1]"""
 
     # to be filled in runtime
     batch_size: int = 0

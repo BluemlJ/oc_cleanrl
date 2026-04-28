@@ -160,6 +160,10 @@ class Args:
     """how the type is embedded into the object vector"""
     include_wh: bool = False
     """use width and height of the objects in addition to position and velocity"""
+    zero_player: bool = False
+    """Player position always zero to have no absolute values"""
+    normalize_objects: bool = False
+    """Normalize position and velocity to [0, 1]"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -232,7 +236,9 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EgoCentricWrapper(env, args.player_name, type_embedding=args.type_embedding,
                                 use_polar_coordinates=args.use_polar_coordinates,
                                 relative_velocity=args.relative_velocity,
-                                include_wh=args.include_wh)
+                                include_wh=args.include_wh,
+                                zero_player=args.zero_player,
+                                normalize=args.normalize_objects)
         env = ObjFlatObsWrapper(env)
 
         return env
