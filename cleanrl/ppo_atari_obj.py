@@ -150,7 +150,7 @@ class Args:
     """Modifications for Hackatari"""
 
     # Wrapper
-    player_name: str = "Player"
+    player_name: str = ""
     """the name of the player category"""
     use_polar_coordinates: bool = False
     """use egocentric polar coordinates instead of cartesian coordinates"""
