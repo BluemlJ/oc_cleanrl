@@ -89,7 +89,7 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = "AIML_OC"
     """the entity (team) of wandb's project"""
-    wandb_dir: str = "../../wandb"
+    wandb_dir: str = "./wandb"
     """the wandb directory"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -151,7 +151,7 @@ class Args:
     """dropout probability in the transformer layers"""
 
     # Wrapper
-    player_name: str = "Player"
+    player_name: str = ""
     """the name of the player category"""
     use_polar_coordinates: bool = False
     """use egocentric polar coordinates instead of cartesian coordinates"""
@@ -313,6 +313,8 @@ if __name__ == "__main__":
     else:
         writer_dir = f"{args.wandb_dir}/runs/{run_name}"
         postfix = None
+
+    os.makedirs(writer_dir, exist_ok=True)
 
     # Create RTPT object
     rtpt = RTPT(name_initials=args.author, experiment_name=f'ORBiT_{args.env_id.split("ALE/")[-1].split("-v")[0]}',
