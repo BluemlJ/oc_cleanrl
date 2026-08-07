@@ -167,8 +167,9 @@ class Args:
     normalize_objects: bool = False
     """Normalize position and velocity to [0, 1]"""
 
-    # Landmarks
+    # Ablation
     landmarks: tuple[tuple[int, int], ...] = ()
+    offset: tuple[int, int] = (0, 0)
 
     # to be filled in runtime
     batch_size: int = 0
@@ -223,7 +224,8 @@ def make_env(env_id, idx, capture_video, run_dir):
                         relative_velocity=args.relative_velocity,
                         include_wh=args.include_wh,
                         zero_player=args.zero_player,
-                        normalize=args.normalize_objects)
+                        normalize=args.normalize_objects,
+                        offset=args.offset)
 
         return env
 
