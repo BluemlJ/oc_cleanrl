@@ -50,6 +50,7 @@ from generic_eval import evaluate  # noqa
 from architectures.common import layer_init
 
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
+from ocrltransformer.wrappers import LandmarkWrapper
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -166,6 +167,9 @@ class Args:
     normalize_objects: bool = False
     """Normalize position and velocity to [0, 1]"""
 
+    # Landmarks
+    landmarks: tuple[tuple[int, int], ...] = ()
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -205,6 +209,9 @@ def make_env(env_id, idx, capture_video, run_dir):
             env = gym.wrappers.RecordVideo(env,
                                            f"{run_dir}/media/videos",
                                            disable_logger=True)
+
+        if len(args.landmarks) > 0:
+            env = LandmarkWrapper(env, args.landmarks)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = NoopResetEnv(env, noop_max=30)
