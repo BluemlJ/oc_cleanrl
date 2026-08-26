@@ -170,6 +170,7 @@ class Args:
     # Ablation
     landmarks: tuple[tuple[int, int], ...] = ()
     offset: tuple[int, int] = (0, 0)
+    exclude: tuple[str, ...] = ()
 
     # to be filled in runtime
     batch_size: int = 0
@@ -225,7 +226,7 @@ def make_env(env_id, idx, capture_video, run_dir):
                         include_wh=args.include_wh,
                         zero_player=args.zero_player,
                         normalize=args.normalize_objects,
-                        offset=args.offset)
+                        offset=args.offset, exclude_classes=args.exclude)
 
         return env
 
