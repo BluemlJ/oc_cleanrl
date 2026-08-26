@@ -277,6 +277,7 @@ class PPOAgent(nn.Module):
 
     def mask(self, x):
         mask = x[..., :self.num_object_types].sum(dim=-1, dtype=bool)
+        mask[(~mask).all(-1)] = True # if there is no object, pass zero matrix
 
         x = self.network(self.transformer(self.encoder(x), src_key_padding_mask=~mask))
         return self.pooling(x, mask)
