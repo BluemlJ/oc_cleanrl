@@ -288,6 +288,7 @@ class PPOAgent(nn.Module):
     def get_action_and_value(self, x, action=None):
         hidden = self.forward(x)
         logits = self.actor(hidden)
+        logits[logits.isnan().all(axis=-1)] = 0
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
