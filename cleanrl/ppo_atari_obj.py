@@ -32,6 +32,8 @@ from stable_baselines3.common.utils import set_random_seed
 
 from ocrltransformer.wrappers import ObjFlatObsWrapper, EgoCentricWrapper
 
+import ocatari_wrappers
+
 # Suppress warnings to avoid cluttering output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -165,6 +167,14 @@ class Args:
     normalize_objects: bool = False
     """Normalize position and velocity to [0, 1]"""
 
+    # Imperfect detection
+    detection_failure_probability: float = 0.0
+    """probability that an object is not detected"""
+    mislabeling_probability: float = 0.0
+    """probability that an object is labeled incorrectly"""
+    noise_std: float = 0.0
+    """noise added to position and dimensions of objects"""
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -231,6 +241,17 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
+
+        # Imperfect detection wrappers (optional)
+        if (args.detection_failure_probability > 0
+                or args.mislabeling_probability > 0
+                or args.noise_std > 0):
+            env = ocatari_wrappers.ImperfectDetectionWrapper(
+                env,
+                args.detection_failure_probability,
+                args.mislabeling_probability,
+                args.noise_std
+            )
 
         # observations are position and velocities
         env = EgoCentricWrapper(env, args.player_name, type_embedding=args.type_embedding,

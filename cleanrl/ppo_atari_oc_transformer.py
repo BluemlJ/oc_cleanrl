@@ -52,6 +52,8 @@ from architectures.common import layer_init
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 from ocrltransformer.wrappers import LandmarkWrapper
 
+import ocatari_wrappers
+
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -150,6 +152,8 @@ class Args:
     """masking away padding objects for batching purpose"""
     dropout: float = 0.0
     """dropout probability in the transformer layers"""
+    encoder_dims: tuple[int, ...] = ()
+    """layer dimensions of the encoder layers"""
 
     # Wrapper
     player_name: str = ""
@@ -171,6 +175,14 @@ class Args:
     landmarks: tuple[tuple[int, int], ...] = ()
     offset: tuple[int, int] = (0, 0)
     exclude: tuple[str, ...] = ()
+
+    # Imperfect detection
+    detection_failure_probability: float = 0.0
+    """probability that an object is not detected"""
+    mislabeling_probability: float = 0.0
+    """probability that an object is labeled incorrectly"""
+    noise_std: float = 0.0
+    """noise added to position and dimensions of objects"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -220,6 +232,18 @@ def make_env(env_id, idx, capture_video, run_dir):
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
+
+        # Imperfect detection wrappers (optional)
+        if (args.detection_failure_probability > 0
+                or args.mislabeling_probability > 0
+                or args.noise_std > 0):
+            env = ocatari_wrappers.ImperfectDetectionWrapper(
+                env,
+                args.detection_failure_probability,
+                args.mislabeling_probability,
+                args.noise_std
+            )
+
         env = OCWrapper(env, args.player_name, type_embedding=args.type_embedding,
                         use_polar_coordinates=args.use_polar_coordinates,
                         relative_velocity=args.relative_velocity,
@@ -234,7 +258,7 @@ def make_env(env_id, idx, capture_video, run_dir):
 
 
 class PPOAgent(nn.Module):
-    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_object_types, device):
+    def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_object_types, device, args):
         super().__init__()
 
         self.device = device
@@ -264,8 +288,14 @@ class PPOAgent(nn.Module):
             else:
                 raise NotImplementedError
 
+        in_dim = dims[1]
+        self.encoder = nn.Sequential()
+        for out_dim in args.encoder_dims:
+            self.encoder.append(nn.Linear(in_dim, out_dim, device=device))
+            self.encoder.append(nn.ReLU())
+            in_dim = out_dim
+        self.encoder.append(nn.Linear(in_dim, emb_dim, device=device))
 
-        self.encoder = nn.Linear(dims[1], emb_dim, device=device)
         self.transformer = TransformerEncoder(encoder_layer, num_blocks)
         self.network = nn.Sequential()
         for _ in range(args.num_post_layers):
@@ -357,7 +387,7 @@ if __name__ == "__main__":
 
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_object_types", 0)[0], device)
+    agent = PPOAgent(envs, args.emb_dim, args.num_heads, args.num_blocks, args.masking, envs.get_attr("num_object_types", 0)[0], device, args)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
