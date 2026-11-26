@@ -47,7 +47,7 @@ eval_dir = os.path.join(Path(__file__).parent.parent, "cleanrl_utils/evals/")
 sys.path.insert(1, eval_dir)
 from generic_eval import evaluate  # noqa
 
-from architectures.common import layer_init
+from cleanrl.architectures.common import layer_init
 
 from ocrltransformer.wrappers import EgoCentricWrapper as OCWrapper
 from ocrltransformer.wrappers import LandmarkWrapper

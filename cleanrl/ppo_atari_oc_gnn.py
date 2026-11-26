@@ -154,9 +154,9 @@ class Args:
     # GNN
     gnn_pooling_type: str = "mean"
     """the type of the pooling layer"""
-    num_edge_layers: int = 3
+    num_edge_layers: int = 2
     """number of layers of the edge MLP"""
-    num_node_layers: int = 3
+    num_node_layers: int = 2
     """number of layers of the node MLP"""
 
     # Wrapper
