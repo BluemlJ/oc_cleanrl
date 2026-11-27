@@ -147,7 +147,7 @@ class Args:
     pooling_type: str = "mean"
     """the type of the pooling layer"""
     num_post_layers: int = 0
-    """number of layers after transformer"""
+    """number of [Linear, ReLU] layers after pooling, before the actor/critic heads"""
     masking: bool = True
     """masking away padding objects for batching purpose"""
     dropout: float = 0.0
@@ -309,8 +309,8 @@ class PPOAgent(nn.Module):
         mask = x[..., :self.num_object_types].sum(dim=-1, dtype=bool)
         mask[(~mask).all(-1)] = True # if there is no object, pass zero matrix
 
-        x = self.network(self.transformer(self.encoder(x), src_key_padding_mask=~mask))
-        return self.pooling(x, mask)
+        x = self.transformer(self.encoder(x), src_key_padding_mask=~mask)
+        return self.network(self.pooling(x, mask))
 
 
     def get_value(self, x):
