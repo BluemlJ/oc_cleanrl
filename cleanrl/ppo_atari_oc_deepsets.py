@@ -143,7 +143,7 @@ class Args:
     pooling_type: str = "mean"
     """the type of the pooling layer"""
     num_post_layers: int = 0
-    """number of layers after transformer"""
+    """number of [Linear, ReLU] layers after pooling, before the actor/critic heads"""
     masking: bool = True
     """masking away padding objects for batching purpose"""
     dropout: float = 0.0
@@ -153,7 +153,7 @@ class Args:
 
     # Deep Sets
     ds_pooling_type: str = "mean"
-    """the type of the pooling layer"""
+    """the type of pooling inside the equivariant layers (max, mean, sum)"""
 
     # Wrapper
     player_name: str = ""
