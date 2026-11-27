@@ -3,10 +3,18 @@ from torch import nn
 
 from cleanrl.ppo_atari_oc_transformer import PPOAgent as TransformerPPOAgent
 
-class SeqLayer(nn.Sequential):
+class GNNStack(nn.Module):
+    def __init__(self, blocks, emb_dim, device):
+        super().__init__()
+        self.blocks = nn.ModuleList(blocks)
+        self.final_norm = nn.LayerNorm(emb_dim, device=device)
+
     def forward(self, x, src_key_padding_mask=None):
-        for module in self:
-            x = module(x, src_key_padding_mask)
+        for block in self.blocks:
+            x = block(x, src_key_padding_mask=src_key_padding_mask)
+        x = self.final_norm(x)
+        if src_key_padding_mask is not None:
+            x = x.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
         return x
 
 
@@ -57,7 +65,7 @@ class GNNLayer(nn.Module):
         msg = self.edge_rest(h)                                               # [B, N, N, D]
 
         # valid = ~torch.eye(N, dtype=torch.bool, device=x.device)             # no self-messages
-        valid = ~torch.ones(N, N, dtype=torch.bool, device=x.device)         # use self-messages
+        valid = torch.ones(N, N, dtype=torch.bool, device=x.device)          # use self-messages
         if src_key_padding_mask is not None:
             valid = valid & ~src_key_padding_mask.unsqueeze(1)                # no padded senders
         valid = valid.unsqueeze(-1)                                           # [B or 1, N, N, 1]
@@ -76,7 +84,9 @@ class Residual(nn.Module):
         self.norm = nn.LayerNorm(emb_dim, device=device)
 
     def forward(self, x, src_key_padding_mask=None):
-        out = x + self.layer(self.norm(x), src_key_padding_mask=src_key_padding_mask)
+        # post-norm (like nn.TransformerEncoderLayer's default): with pre-norm, the un-normalized
+        # encoder output (~100x larger than a block's update) dominated the residual stream
+        out = self.norm(x + self.layer(x, src_key_padding_mask=src_key_padding_mask))
         if src_key_padding_mask is not None:
             out = out.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
         return out
@@ -86,4 +96,4 @@ class GNNPPOAgent(TransformerPPOAgent):
     def __init__(self, envs, emb_dim, num_heads, num_blocks, masking, num_object_types, device, args):
         super().__init__(envs, emb_dim, num_heads, num_blocks, masking, num_object_types, device, args)
 
-        self.transformer = SeqLayer(*[Residual(GNNLayer(device, args), emb_dim, device) for _ in range(num_blocks)])
+        self.transformer = GNNStack([Residual(GNNLayer(device, args), emb_dim, device) for _ in range(num_blocks)], emb_dim, device)
